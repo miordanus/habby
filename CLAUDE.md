@@ -1,374 +1,457 @@
-# CLAUDE.md — SubTracker (bug-free-subs)
+# ONE-SHOT PROMPT FOR CLAUDE CODE (Next.js App Router + Supabase + Vercel + Telegram Mini App)
+You are Claude Code acting as a Senior Full-Stack Engineer + Product-minded Game Designer.
+You will implement an MVP “Neurochemistry Performance Tracker” in an EXISTING repo (a duplicated repo from a previous Telegram miniapp project).
+You MUST reuse existing infra: Telegram initData auth, Supabase client, UI patterns, deployment setup. Do not reinvent.
 
-This file provides guidance for AI assistants (Claude Code and others) working in this repository.
-
----
-
-## Project Overview
-
-**SubTracker** is a dark-themed, mobile-optimised subscription management Telegram Mini App built for a couple ("Max" and "Molly"). It tracks recurring charges, shows monthly burn rates per currency, and lists upcoming payments.
-
-**Architecture**: The app runs exclusively as a Telegram Mini App (`@subsion_bot`). Telegram authentication is validated server-side (HMAC), and data is stored in **Supabase** (PostgreSQL), scoped to a household. A legacy localStorage fallback exists only for migrating old data into Supabase.
-
----
-
-## Technology Stack
-
-| Layer | Technology |
-|---|---|
-| Framework | Next.js 16 (App Router) |
-| UI library | React 19 |
-| Language | TypeScript 5 (strict mode) |
-| Styling | Tailwind CSS 4 (utility classes only, no component library) |
-| Fonts | Geist Sans + Geist Mono (via `geist` npm package) |
-| Database | Supabase (PostgreSQL) via `@supabase/supabase-js` |
-| Auth | Telegram Mini App initData HMAC validation |
-| Linting | ESLint 9 with `eslint-config-next` |
-| Build | `next build` / `next dev` |
-
-No test framework is configured.
+## WHAT YOU MUST DO FIRST
+1) Read `/claude.md` in the repo (current). Read it fully.
+2) Scan repo for:
+   - Telegram initData auth verification (server route / middleware / utils)
+   - Supabase client setup (client + server)
+   - Existing DB tables/migrations
+   - Any existing “subscriptions tracker” UI components (to reuse layout, safe-area fixes, styling)
+3) Then implement the MVP using the existing patterns. Only add what’s needed.
+4) Output only the code changes and migration SQL files required.
 
 ---
 
-## Directory Structure
-
-```
-bug-free-subs/
-├── app/
-│   ├── api/
-│   │   ├── auth/
-│   │   │   └── telegram/route.ts   # POST — HMAC-validate Telegram initData
-│   │   ├── me/route.ts             # GET  — resolve household for a Telegram user
-│   │   └── subscriptions/
-│   │       ├── route.ts            # GET (list), POST (create)
-│   │       └── [id]/route.ts       # PATCH (update), DELETE
-│   ├── layout.tsx                  # Root layout: fonts, theme-flash prevention
-│   ├── page.tsx                    # Main page: env detection, auth, state, CRUD
-│   └── globals.css                 # Tailwind import + CSS variables (light + dark)
-├── components/
-│   ├── BurnSummary.tsx             # Monthly spend totals grouped by currency
-│   ├── UpcomingList.tsx            # Next 10 upcoming charges (chronological)
-│   ├── SubscriptionList.tsx        # Full list with edit/delete actions
-│   └── SubscriptionForm.tsx        # Add/edit modal (bottom-sheet on mobile)
-├── lib/
-│   ├── storage.ts                  # loadSubs() / saveSubs() — localStorage adapter (migration only)
-│   ├── calculations.ts             # getBurnSummary(), getUpcoming(), CURRENCY_SYMBOL
-│   ├── supabaseServer.ts           # SERVER ONLY — Supabase client + getHouseholdId()
-│   └── telegram.ts                 # Client-side Telegram Mini App helpers (SSR-safe)
-├── types/
-│   └── subscription.ts             # Core types: Subscription, Currency, BillingCycle, Owner
-├── public/                         # Static assets (SVGs, favicon)
-├── next.config.ts                  # Minimal Next.js config
-├── tsconfig.json                   # TypeScript config (strict, path alias @/*)
-├── eslint.config.mjs               # ESLint config (next/core-web-vitals, typescript)
-└── postcss.config.mjs              # PostCSS config (@tailwindcss/postcss)
-```
+# HARD CONSTRAINTS
+- Do NOT change the underlying methodology/protocol logic. Only implement product mechanics around it.
+- Single user expected, but DO NOT weaken security:
+  - NEVER put Supabase service_role in client
+  - Use RLS properly
+  - Telegram initData must be verified server-side
+- Must work well in iOS Telegram (safe-area, no overlap).
+- Day boundary: 05:00 (logical day).
+- Check-ins should be fast, clicker-first, anti-shame (no penalties).
 
 ---
 
-## Environment Variables
+# PRODUCT REQUIREMENTS (LOCKED)
 
-The following environment variables must be set (e.g. in `.env.local`):
+## Day boundary
+- Logical date = date part of (now - 5 hours) in user timezone.
+- All “today”, XP, streaks use logical date.
 
-| Variable | Required | Description |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather; used for HMAC validation of initData |
-| `SUPABASE_URL` | Yes | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Service role key (server-only; **never expose to the browser**) |
+## Reminders
+- Morning push: 08:30 local
+- Evening push: 23:30 local
+Each message includes button opening the miniapp check-in.
 
----
+Implement reminders via Vercel Cron hitting API routes that call Telegram Bot API.
 
-## Core Data Model
+## Daily tracking fields
+Core:
+- wake_time (time)
+- sleep_time (time)
+- phone_free_min (0/15/30/60)
+- caffeine_cups (int)
+- nicotine_count (int)
+- calories (int)
+- protein_g (int)
+- water_ml (int)
+- training_type ('none'|'swim'|'gym'|'home')
 
-Defined in `types/subscription.ts`:
+Optional:
+- resting_hr (int)
+- weight_kg (numeric)
 
-```typescript
-export type Currency     = "EUR" | "USD" | "RUB"
-export type BillingCycle = "monthly" | "yearly"
-export type Owner        = "me" | "wife"   // DB values; UI labels are "Max" / "Molly"
+Vitamins (booleans):
+- vitamins_adam
+- magnesium
+- l_theanine
 
-export type Subscription = {
-  id:             string   // UUID (from Supabase or crypto.randomUUID())
-  name:           string
-  amount:         number   // float
-  currency:       Currency
-  billingCycle:   BillingCycle
-  nextChargeDate: string   // ISO date: YYYY-MM-DD
-  category:       string   // free-text, e.g. "Entertainment"
-  card:           string   // free-text, e.g. "Visa *4242"
-  owner:          Owner
-}
-```
+Alcohol:
+- alcohol_yes (boolean). “No alcohol” means false.
 
-**UI labels vs DB values**: The form shows "Max" / "Molly" but stores/sends `"me"` / `"wife"`. These are the canonical DB values.
+## Goals (editable in UI, future-only, versioned)
+Default goal values (create automatically if none exist):
+- caffeine_cups <= 2
+- nicotine_count <= 20
+- water_ml >= 2000
+- protein_g >= 150
+- calories == 2700 (treat as target range, see below)
+- alcohol_yes == false
+- vitamins_adam == true
+- magnesium == true
+- l_theanine == true (ONLY if caffeine_cups > 0; otherwise treat as N/A and do not evaluate)
 
----
+Goals rules:
+- Goal edits apply ONLY from a future effective date (tomorrow or later). No retro changes.
+- Store goal versions.
+- On date D, pick the latest goal version where effective_from <= D.
+- Persist per-day evaluation with deltas, so later goal changes don’t rewrite history.
 
-## Supabase Database Schema
+Calories goal evaluation:
+- Use a tolerance band to avoid self-abuse: target 2700 with +/- 10% (2430–2970) counts as “met”.
+- Store delta as (actual - target) numeric.
 
-The API routes use these tables (snake_case column names):
+## Gamification (XP only, no penalties)
+XP events are idempotent; avoid farming.
+XP actions:
+- Quick check-in saved: +20 XP
+- Full check-in saved: +35 XP
+  Criteria for “full”: daily log contains nicotine+caffeine+water+calories+protein AND at least one of wake_time/sleep_time.
+- Backfill day saved: +15 XP (when editing a past date)
+- Phone-free >=30 min: +10 XP (once/day)
+- Caffeine goal met: +10 XP (once/day)
+- Nicotine goal met: +10 XP (once/day)
+- Weekly training goal: if >=2 sessions in last 7 logical days, award +40 XP once per ISO week.
 
-### `subscriptions`
-| Column | Type | Notes |
-|---|---|---|
-| `id` | uuid | Primary key |
-| `household_id` | uuid | FK to `households` |
-| `created_by_telegram_user_id` | bigint | Telegram user who created the row |
-| `name` | text | |
-| `amount` | numeric | |
-| `currency` | text | `"EUR"` / `"USD"` / `"RUB"` |
-| `billing_cycle` | text | `"monthly"` / `"yearly"` |
-| `next_charge_date` | text | ISO date `YYYY-MM-DD` |
-| `category` | text | |
-| `card` | text | |
-| `owner` | text | `"me"` / `"wife"` |
-| `updated_at` | timestamptz | Set on PATCH |
+Streak:
+- A day counts “logged” if there is a daily_logs row for that logical date.
+- Streak increments on consecutive logged logical days.
+- Shield: 1 missed day per ISO week does not reset streak (auto). Missing >1 day breaks streak.
 
-### `household_members`
-| Column | Type | Notes |
-|---|---|---|
-| `telegram_user_id` | bigint | Telegram numeric user ID |
-| `household_id` | uuid | FK to `households` |
+Backfill window:
+- Backfill allowed up to 7 days.
+- Backfill counts toward streak ONLY if entered within 72 hours of that date.
 
-### `households`
-| Column | Type | Notes |
-|---|---|---|
-| `id` | uuid | Primary key |
-| `name` | text | Display name |
+## “Me vs me” stats
+Stats screen shows This week vs Last week:
+- days logged
+- avg nicotine/day
+- avg caffeine/day
+- avg calories
+- avg protein
+- avg water
+- avg wake time + basic consistency (optional: std dev)
+- training count
 
-**Column name mapping**: JavaScript uses camelCase (`billingCycle`, `nextChargeDate`); the DB uses snake_case (`billing_cycle`, `next_charge_date`). The `rowToSub()` helper in each route handles the conversion.
-
----
-
-## API Routes
-
-All routes (except `/api/auth/telegram`) require the `x-telegram-user-id` header containing the authenticated user's numeric Telegram ID.
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/auth/telegram` | Validates Telegram `initData` via HMAC-SHA256. Returns `{telegram_user_id, username, first_name, last_name}`. |
-| `GET` | `/api/me` | Returns `{household_id, household_name}` for the authenticated user or 404. |
-| `GET` | `/api/subscriptions` | Returns all subscriptions for the user's household, ordered by `next_charge_date`. |
-| `POST` | `/api/subscriptions` | Creates a new subscription. Body: `Subscription` (excluding `id`). Returns 201 + created row. |
-| `PATCH` | `/api/subscriptions/[id]` | Updates a subscription. Scoped to household. Returns updated row. |
-| `DELETE` | `/api/subscriptions/[id]` | Deletes a subscription. Scoped to household. Returns 204. |
-
----
-
-## Telegram Mini App Architecture
-
-### Environment Detection (`lib/telegram.ts`)
-
-`detectTelegramEnv()` checks four signals (in priority order):
-1. `window.Telegram.WebApp` exists
-2. `window.TelegramWebviewProxy` exists (Telegram Desktop / macOS)
-3. URL search params contain `tgWebAppData`
-4. URL hash contains `tgWebAppData`
-
-`getTelegramInitData()` extracts initData from:
-1. `window.Telegram.WebApp.initData` (non-empty string)
-2. URL search string (if `tgWebAppData` present)
-3. URL hash string (if `tgWebAppData` present)
-
-The resolved initData is cached to `localStorage["tg_initData_v1"]`.
-
-### initData Validation (`app/api/auth/telegram/route.ts`)
-
-The route handles two formats of initData:
-- **"raw"** — standard `query_id=...&user=...&auth_date=...&hash=...`
-- **"wrapper"** — `tgWebAppData=<percent-encoded raw initData>&tgWebAppVersion=...&...`
-
-HMAC validation follows the [Telegram Web Apps spec](https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app):
-```
-secret_key   = HMAC-SHA256("WebAppData", bot_token)
-expected_hash = HMAC-SHA256(data_check_string, secret_key)
-```
-
-Uses `crypto.timingSafeEqual` for the comparison.
-
-### Auth State Machine (`app/page.tsx`)
-
-`envState`: `"checking"` → `"telegram"` | `"web"`
-`authStatus`: `"checking"` → `"authed"` | `"no_initdata"` | `"invalid_initdata"` | `"not_in_household"` | `"error"`
-
-**Startup sequence:**
-1. Retry loop polls `detectTelegramEnv()` up to 10 times × 200 ms (2 s total).
-2. If Telegram detected → call `/api/auth/telegram` to validate initData.
-3. On success → call `/api/me` to resolve household.
-4. On household found → `GET /api/subscriptions` to load data.
-
-If `envState` resolves to `"web"` (non-Telegram browser), the app shows: *"Open this app from Telegram: @subsion_bot"* and nothing else.
+## Anti-shame UI
+- No red failures.
+- No negative XP.
+- If alcohol_yes = true: do not punish; just show neutral note and still allow logging XP.
 
 ---
 
-## State Management Pattern
+# MVP UX SCREENS (MUST IMPLEMENT)
 
-`app/page.tsx` is the single stateful root. Key state groups:
+## Screen 1: Home (Today)
+- XP today
+- Level progress bar (simple: level = floor(totalXP / 500) + 1)
+- Current streak + shield status
+- “Today Contract” chips (today’s goals)
+- Clickers:
+  - 🚬 +1, +5, -1
+  - 💧 +250, +500
+  - ☕ +1, -1
+  - 🍽 Calories +200, +500
+  - 🥩 Protein +25, +50
+- Buttons:
+  - Quick Check-in
+  - Full Check-in (expand)
+  - History (last 7 days)
+  - Goals (Next Contract)
 
-```typescript
-// Environment & auth
-const [envState, setEnvState]       = useState<EnvState>("checking")
-const [authStatus, setAuthStatus]   = useState<AuthStatus>("checking")
-const [tgProfile, setTgProfile]     = useState<TgProfile | null>(null)
-const [householdId, setHouseholdId] = useState<string | null>(null)
-const [householdName, ...]          = useState<string | null>(null)
+## Screen 2: Check-in (Quick + Expand)
+Quick fields:
+- nicotine_count (clicker)
+- caffeine_cups (clicker)
+- calories (clicker + manual)
+- protein_g (clicker + manual)
+- water_ml (clicker)
+- wake_time (default now, editable)
+- sleep_time (editable)
+- phone_free_min (0/15/30/60)
+- training_type toggle
+- vitamins toggles (3)
+- alcohol toggle
 
-// Data
-const [subs, setSubs]               = useState<Subscription[]>([])
+## Screen 3: History (last 7 days)
+- list last 7 logical dates with badges (logged / backfilled)
+- tap to edit day
+- enforce backfill <= 7 days
 
-// UI
-const [mounted, setMounted]         = useState(false)
-const [modalOpen, setModalOpen]     = useState(false)
-const [editing, setEditing]         = useState<Subscription | null>(null)
-const [isDark, setIsDark]           = useState(true)
-const [monthLabel, setMonthLabel]   = useState("")
+## Screen 4: Goals (Next Contract)
+- Show current goal version (read-only)
+- Create/Edit next goal version:
+  - Effective date (tomorrow default; allow pick future date)
+  - Targets editable for:
+    - nicotine max
+    - caffeine max
+    - water min
+    - protein min
+    - calories target (2700 default)
+    - alcohol free (bool)
+    - vitamins required (bools)
+- Save creates new goal version; does not alter past evaluations.
 
-// localStorage migration
-const [localImportReady, ...]       = useState(false)
-const [importing, ...]              = useState(false)
-
-// Debug
-const [initDataLength, ...]         = useState<number | null>(null)
-const [lastAuthHttpStatus, ...]     = useState<number | null>(null)
-const [showDebug, setShowDebug]     = useState(false)
-```
-
-**Rules:**
-- Do not add `useState` or data-fetching in leaf components — keep all state in `page.tsx`.
-- CRUD handlers (`handleSave`, `handleDelete`) send API requests and update `subs` in place.
-- `handleSave` returns `string | null` (error message or null on success); the form awaits this and shows errors inline.
-
----
-
-## Business Logic (`lib/calculations.ts`)
-
-- **`getBurnSummary(subs)`** — sums monthly cost per currency. Yearly subscriptions are divided by 12.
-- **`getUpcoming(subs)`** — returns the next 10 subscriptions sorted by `nextChargeDate` (ISO string lexicographic sort is safe).
-- **`CURRENCY_SYMBOL`** — maps `Currency` → display symbol (`EUR→€`, `USD→$`, `RUB→₽`).
-
----
-
-## localStorage — Migration Layer Only
-
-`lib/storage.ts` is no longer the primary data store. Its role is:
-1. Detect pre-Supabase data during startup (in `useEffect`).
-2. Offer a one-time import banner to push local subs to the API.
-3. On user confirmation, clear `localStorage["subs_v2"]` and `localStorage["subs_v1"]`.
-
-The current active localStorage key is `"subs_v2"`. On load, `subs_v1` data is auto-migrated (including renaming `owner: "max"` → `"me"` and `"molly"` → `"wife"`).
-
-**Never use `localStorage` at module level or outside `useEffect`.**
+## Screen 5: Stats
+- This week vs Last week (cards)
+- Basic charts (optional, minimal): nicotine, caffeine, calories, protein, water.
 
 ---
 
-## Server-Only Module (`lib/supabaseServer.ts`)
+# IMPLEMENTATION DETAILS (YOU MUST EXECUTE)
 
-This module uses `SUPABASE_SERVICE_ROLE_KEY` and **must only be imported from API route handlers** (`app/api/**`). Importing it in any client component or `lib/telegram.ts` would leak the service role key to the browser.
+## 1) Database + RLS (Supabase) — SQL migrations
+Add migrations (Supabase CLI style if repo uses it; otherwise add `/supabase/migrations/*.sql` similarly).
 
-The module is lazily initialised (client created on first call) so it does not throw at build time if env vars are absent.
+### A) Table: daily_logs
+Columns:
+- id uuid primary key default gen_random_uuid()
+- user_id uuid not null
+- date date not null
+- wake_time time null
+- sleep_time time null
+- phone_free_min int null
+- caffeine_cups int not null default 0 check (caffeine_cups >= 0)
+- nicotine_count int not null default 0 check (nicotine_count >= 0)
+- calories int null check (calories >= 0)
+- protein_g int null check (protein_g >= 0)
+- water_ml int not null default 0 check (water_ml >= 0)
+- training_type text not null default 'none' check (training_type in ('none','swim','gym','home'))
+- resting_hr int null check (resting_hr >= 30 and resting_hr <= 200)
+- weight_kg numeric(5,2) null check (weight_kg >= 30 and weight_kg <= 300)
+- vitamins_adam boolean not null default false
+- magnesium boolean not null default false
+- l_theanine boolean not null default false
+- alcohol_yes boolean not null default false
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+Constraints:
+- unique(user_id, date)
+
+Add trigger to update updated_at on update.
+
+### B) Goals tables (versioned)
+Table: goals
+- id uuid pk default gen_random_uuid()
+- user_id uuid not null
+- effective_from date not null
+- created_at timestamptz default now()
+- unique(user_id, effective_from)
+
+Table: goal_items
+- id uuid pk default gen_random_uuid()
+- goal_id uuid not null references goals(id) on delete cascade
+- metric_key text not null
+- operator text not null check (operator in ('<=','>=','==','range'))
+- target_number numeric null
+- target_bool boolean null
+- tolerance_number numeric null  -- used for range goals (e.g., calories)
+- xp_reward int not null default 10
+- xp_cap int null
+- is_active boolean not null default true
+
+Metric keys to support:
+- nicotine_count (<=)
+- caffeine_cups (<=)
+- water_ml (>=)
+- protein_g (>=)
+- calories (range) with target_number=2700 and tolerance_number=0.10
+- alcohol_yes (== false)
+- vitamins_adam (== true)
+- magnesium (== true)
+- l_theanine (== true, but N/A if caffeine_cups == 0)
+
+### C) Goal evaluation persistence
+Table: daily_goal_evaluations
+- id uuid pk default gen_random_uuid()
+- user_id uuid not null
+- date date not null
+- goal_id_used uuid not null references goals(id)
+- metric_key text not null
+- actual_number numeric null
+- actual_bool boolean null
+- target_number numeric null
+- target_bool boolean null
+- delta_number numeric null
+- met boolean not null
+- xp_awarded int not null default 0
+- created_at timestamptz default now()
+Constraints:
+- unique(user_id, date, metric_key)
+
+### D) XP events (idempotent)
+Table: xp_events
+- id uuid pk default gen_random_uuid()
+- user_id uuid not null
+- date date not null
+- event_type text not null
+- xp int not null check (xp >= 0)
+- meta jsonb null
+- created_at timestamptz default now()
+
+Uniqueness for idempotency:
+- unique(user_id, date, event_type)
+
+Event types to implement:
+- checkin_quick
+- checkin_full
+- checkin_backfill
+- bonus_phone_free_30
+- bonus_goal_caffeine
+- bonus_goal_nicotine
+- weekly_training_bonus
+
+### E) Aggregate view or helper (optional)
+You may create a view for:
+- total_xp per user
+- xp_today
+- current_streak (can be computed server-side)
+
+### RLS
+Enable RLS on all tables.
+Policies:
+- daily_logs: user_id = auth.uid()
+- goals/goal_items: user owns goals via goals.user_id = auth.uid()
+- daily_goal_evaluations: user_id = auth.uid()
+- xp_events: user_id = auth.uid()
+
+## 2) Server-side logic (Next.js App Router)
+Implement server actions or API routes (prefer server actions for app router) for:
+
+### A) getLogicalDate()
+Utility:
+- logicalDate = new Date(Date.now() - 5*60*60*1000)
+- return yyyy-mm-dd
+
+Use it consistently.
+
+### B) Upsert daily log
+Function:
+- upsert row by (user_id, date)
+- return the saved row
+
+### C) Award XP (idempotent)
+On save:
+- Determine if date is today or backfill.
+- Insert xp_events with unique constraints to prevent duplicates.
+
+Rules:
+- If editing date < today:
+  - insert `checkin_backfill` once for that day
+- Insert checkin_quick or checkin_full based on criteria (idempotent).
+- If phone_free_min >= 30 → award bonus_phone_free_30
+- Evaluate goals for that date (see below) and persist daily_goal_evaluations:
+  - Determine goal version used for that date
+  - Compute met + delta for each active goal_item
+  - Store evaluation row per metric_key (upsert)
+  - Award XP events for caffeine + nicotine met (as per spec) via xp_events
+  - Vitamins/alcohol/calories/protein/water goal XP: DO NOT add extra XP beyond the listed ones in MVP unless you decide to add as “future”, but keep it minimal. For now, only the spec’d daily bonuses + logging XP.
+  - However still persist evaluations for all metrics for UI.
+
+Special rule:
+- l_theanine evaluation is N/A if caffeine_cups == 0:
+  - store met=true and delta null OR store met=true with meta “na”
+  - do not award/withhold any XP based on it
+
+Weekly training bonus:
+- Once per ISO week:
+  - Count daily_logs in last 7 logical days with training_type != 'none'
+  - If >=2 → insert weekly_training_bonus with date = logicalDate
+  - Use event_type uniqueness plus a “week key” in meta if needed (or create additional unique constraint per week; simplest: event_type = `weekly_training_bonus_YYYY-WW`).
+
+### D) Streak computation
+Compute streak server-side:
+- Get recent 30 days of daily_logs ordered by date desc.
+- Determine logged days by existence.
+- Apply shield:
+  - For current ISO week: allow 1 missed day without breaking streak.
+  - For previous weeks: streak breaks as soon as there is a gap > allowed shield in that week.
+Simpler MVP acceptable:
+- Compute streak as consecutive logged days from today backward,
+  allowing one skip within current ISO week.
+Persist streak value in a computed endpoint, no need table.
+
+### E) Goals editing (future-only)
+UI saves a new goals row:
+- effective_from must be >= tomorrow (logical tomorrow).
+- Create goal record + goal_items for all targets.
+- Do not modify past evaluations.
+- After saving goals, future days will use that version.
+
+### F) Telegram reminders via cron endpoints
+Create API routes:
+- `/api/cron/morning`
+- `/api/cron/evening`
+Secured by a secret token (CRON_SECRET) in headers/query.
+They call Telegram Bot API sendMessage to the single user (chat_id from env).
+Message includes an inline button that opens the miniapp (web_app).
+Use existing bot token env.
+
+Env vars (server only):
+- TELEGRAM_BOT_TOKEN
+- TELEGRAM_CHAT_ID (single user)
+- CRON_SECRET
+- SUPABASE_SERVICE_ROLE_KEY (server only, if needed for cron; prefer anon + user session where possible; cron can be server role if only sending message)
+- SUPABASE_URL
+- SUPABASE_ANON_KEY
+
+## 3) Client UI (React, Telegram miniapp)
+Reuse existing UI framework in repo.
+
+Requirements:
+- iOS safe-area handling (use env(safe-area-inset-*) or existing patterns)
+- Fast interactions (clickers)
+- Visible immediate feedback on Save (+XP breakdown)
+- History editing with date selector (last 7 days)
+
+### Home
+- show today totals + clickers
+- show XP today, total XP, level, streak, shield icon
+- show goal chips for today (from evaluations or from goal version)
+
+### Check-in
+- quick mode default
+- expandable sections:
+  - Sleep
+  - Health (HR/weight)
+  - Vitamins
+  - Alcohol
+- Save button with success toast
+
+### Goals screen
+- show current goals
+- edit next goals:
+  - nicotine max
+  - caffeine max
+  - water min
+  - protein min
+  - calories target (default 2700)
+  - alcohol free bool
+  - vitamins required bools
+- effective date picker default tomorrow
+- enforce future-only with validation message
+
+### Stats
+- compute week aggregates from daily_logs
+- show week-over-week cards
 
 ---
 
-## Component Conventions
-
-- Every component file uses `"use client"` where interactivity or browser APIs are needed.
-- Tailwind classes are written inline. Shared class strings are extracted to `const` at the top of the file (e.g. `INPUT` and `LABEL` in `SubscriptionForm.tsx`).
-- Owner badges / buttons: `"me"` (Max) → white/gray; `"wife"` (Molly) → `#FF6B9D` (pink).
-- Accent colour: `#00FF85` (bright green). Used for primary actions (FAB, submit button, selected toggle).
-- CSS custom properties drive the palette (see `globals.css`):
-
-| Variable | Dark | Light |
-|---|---|---|
-| `--bg-page` | `#0A0A0A` | `#F5F5F5` |
-| `--bg-card` | `#111111` | `#FFFFFF` |
-| `--bg-input` | `#0A0A0A` | `#FAFAFA` |
-| `--border` | `#1F1F1F` | `#E5E5E5` |
-| `--input-border` | `#2A2A2A` | `#D1D5DB` |
-| `--text` | `#FFFFFF` | `#111111` |
-
-Dark mode is applied via the `.dark` class on `<html>`, toggled at runtime and persisted to `localStorage["theme"]`. The layout injects an inline script to restore the theme before first paint, preventing flash.
+# QA CHECKLIST (YOU MUST DO)
+- Test iOS Telegram safe-area: no overlapping top buttons, no clipped Save.
+- Verify Telegram initData auth still works.
+- Verify RLS blocks unauthenticated access.
+- Verify no service role key shipped to client bundle.
+- Verify XP events are idempotent (saving multiple times doesn’t farm XP).
+- Verify logical day at 05:00 works (simulate late-night usage).
+- Verify backfill:
+  - can edit last 7 days
+  - streak credit only within 72h rule
 
 ---
 
-## Theme Toggle
-
-The theme button (`☀️` / `🌙`) in the page header:
-1. Calls `toggleTheme()` in `page.tsx`.
-2. Adds/removes `"dark"` class on `document.documentElement`.
-3. Saves `"light"` or `"dark"` to `localStorage["theme"]`.
-
-Default on first load: dark.
-
----
-
-## CSV Export
-
-`exportCSV()` in `page.tsx` builds a CSV string from the current `subs` array and triggers a browser download. Available only when `subs.length > 0`.
+# ACCEPTANCE CRITERIA
+1) A user can open miniapp and submit a daily log in <60 seconds using clickers.
+2) Goals can be edited in UI for future date only; past does not change.
+3) daily_goal_evaluations are stored per day and remain stable after goal changes.
+4) XP + Level + Streak + Shield behave as spec.
+5) Telegram morning/evening reminders work via cron endpoints.
+6) Calories target is stored and evaluated as range (±10%).
+7) Vitamins and alcohol toggles are tracked and stored daily.
+8) “This week vs last week” stats screen works with real data.
 
 ---
 
-## SSR / Hydration Rules
+# IMPORTANT IMPLEMENTATION NOTE
+Because this repo is a duplicate of a previous miniapp, you MUST:
+- reuse existing layout, theming, safe-area logic, and Telegram integration
+- avoid large refactors
+- add only necessary new components and pages
+- keep code style consistent with existing project conventions
 
-Next.js pre-renders on the server, but `localStorage` and `window` are browser-only.
-
-1. `useState` initialises with empty/false values.
-2. `useEffect(() => { setMounted(true); ... }, [])` runs only on the client.
-3. `page.tsx` returns a bare loading skeleton when `mounted === false`.
-4. All `window`/`localStorage` access is inside `useEffect` or guarded by `typeof window === "undefined"`.
-
-Never call `localStorage` or access `window` at module level or in component bodies outside `useEffect`.
-
----
-
-## Development Commands
-
-```bash
-npm run dev    # Start dev server at http://localhost:3000 (hot reload)
-npm run build  # Build for production (output in .next/)
-npm run start  # Serve the production build
-npm run lint   # Run ESLint
-```
-
-There is no test command — do not add a `test` script or test files unless explicitly asked to set up a test framework.
-
----
-
-## Path Alias
-
-TypeScript is configured with `@/*` resolving to the repository root. Always import using this alias:
-
-```typescript
-// correct
-import { Subscription }  from "@/types/subscription"
-import { loadSubs }      from "@/lib/storage"
-import { getSupabase }   from "@/lib/supabaseServer"  // server-side only
-
-// avoid
-import { Subscription }  from "../../types/subscription"
-```
-
----
-
-## No Tests
-
-There is currently no test infrastructure. If adding tests, prefer **Vitest** with `@testing-library/react`. Do not introduce Jest unless explicitly requested.
-
----
-
-## Adding New Features — Checklist
-
-1. Add or update types in `types/subscription.ts` first.
-2. If the `Subscription` shape changes in a breaking way, bump the localStorage key (`subs_v2` → `subs_v3`) and add a migration in `lib/storage.ts`. Update the Supabase `subscriptions` table schema accordingly.
-3. Add pure business logic functions to `lib/calculations.ts`.
-4. Add or update API route handlers in `app/api/` (server logic, Supabase calls, auth checks).
-5. Wire new state/handlers in `app/page.tsx`; pass only what's needed as props.
-6. Create or update components in `components/`; keep them presentational where possible.
-7. Run `npm run lint` before committing.
-
----
-
-## Git Conventions
-
-- Branch names follow the pattern `claude/<slug>-<session-id>`.
-- Commit messages use the imperative form prefixed with a type: `feat:`, `fix:`, `refactor:`, `chore:`, `docs:`.
-- There are no git hooks or CI pipelines configured. Linting is a manual step.
+Proceed to implement now.
