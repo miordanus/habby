@@ -455,3 +455,19 @@ Because this repo is a duplicate of a previous miniapp, you MUST:
 - keep code style consistent with existing project conventions
 
 Proceed to implement now.
+
+## OUTPUT REQUIREMENTS (DOCUMENTATION)
+Along with code changes, create `docs/SETUP.md` that includes:
+1) Supabase project creation steps (dashboard)
+2) Where to paste SQL migrations (Supabase CLI or SQL editor) based on repo setup:
+   - If repo uses Supabase CLI: commands `supabase init`, `supabase link`, `supabase db push`
+   - Otherwise: “SQL Editor → run migrations in order”
+3) How to enable RLS and verify policies (include SQL checks)
+4) Required environment variables for:
+   - Next.js (client + server)
+   - Vercel
+   - Telegram bot
+   - Cron security secret
+5) How to set Vercel Cron schedules for morning/evening endpoints
+6) How to obtain Telegram Chat ID for the single user (safe method)
+7) Verification checklist: auth works, RLS works, cron works, iOS safe-area ok
