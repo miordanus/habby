@@ -1,36 +1,18 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getSupabase } from "@/lib/supabaseServer"
+import { getUserId } from "@/lib/supabaseServer"
 
 export async function GET(req: NextRequest) {
-  const rawId = req.headers.get("x-telegram-user-id")
-  if (!rawId) {
-    return NextResponse.json({ error: "Missing x-telegram-user-id" }, { status: 400 })
+  const tgIdStr = req.headers.get("x-telegram-user-id")
+  if (!tgIdStr) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+  const telegramUserId = Number(tgIdStr)
+  if (!Number.isFinite(telegramUserId)) return NextResponse.json({ error: "Bad user id" }, { status: 400 })
+
+  try {
+    const userId = await getUserId(telegramUserId)
+    return NextResponse.json({ user_id: userId })
+  } catch (err) {
+    console.error("[/api/me]", err)
+    return NextResponse.json({ error: "Internal error" }, { status: 500 })
   }
-
-  const userId = parseInt(rawId, 10)
-  if (isNaN(userId)) {
-    return NextResponse.json({ error: "Invalid telegram_user_id" }, { status: 400 })
-  }
-
-  const { data, error } = await getSupabase()
-    .from("household_members")
-    .select("household_id, households(name)")
-    .eq("telegram_user_id", userId)
-    .maybeSingle()
-
-  if (error || !data) {
-    return NextResponse.json({ error: "not_in_household" }, { status: 404 })
-  }
-
-  const householdName =
-    data.households && !Array.isArray(data.households)
-      ? (data.households as { name: string }).name
-      : Array.isArray(data.households) && data.households.length > 0
-        ? (data.households[0] as { name: string }).name
-        : null
-
-  return NextResponse.json({
-    household_id: data.household_id as string,
-    household_name: householdName ?? null,
-  })
 }
