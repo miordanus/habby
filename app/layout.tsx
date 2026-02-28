@@ -4,8 +4,8 @@ import { GeistMono } from "geist/font/mono"
 import "./globals.css"
 
 export const metadata: Metadata = {
-  title: "SubTracker",
-  description: "Subscription tracker for a couple",
+  title: "habby",
+  description: "Neurochemistry Performance Tracker",
 }
 
 export const viewport: Viewport = {

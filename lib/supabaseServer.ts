@@ -18,14 +18,29 @@ export function getSupabase(): SupabaseClient<any> {
   return _client
 }
 
-/** Resolve household_id for a given Telegram user. Returns null if not found. */
-export async function getHouseholdId(telegramUserId: number): Promise<string | null> {
-  const { data, error } = await getSupabase()
-    .from("household_members")
-    .select("household_id")
+/**
+ * Upsert user by telegram_user_id and return internal UUID.
+ * Safe to call on every request — upsert is idempotent.
+ */
+export async function getUserId(telegramUserId: number): Promise<string> {
+  const sb = getSupabase()
+
+  // Try to get existing user first (avoids upsert permission issues on some policies)
+  const { data: existing } = await sb
+    .from("users")
+    .select("id")
     .eq("telegram_user_id", telegramUserId)
     .maybeSingle()
 
-  if (error || !data) return null
-  return data.household_id as string
+  if (existing?.id) return existing.id as string
+
+  // Insert new user
+  const { data: created, error } = await sb
+    .from("users")
+    .insert({ telegram_user_id: telegramUserId })
+    .select("id")
+    .single()
+
+  if (error || !created) throw new Error(`Failed to create user: ${error?.message}`)
+  return created.id as string
 }
