@@ -1,473 +1,570 @@
-# ONE-SHOT PROMPT FOR CLAUDE CODE (Next.js App Router + Supabase + Vercel + Telegram Mini App)
-You are Claude Code acting as a Senior Full-Stack Engineer + Product-minded Game Designer.
-You will implement an MVP “Neurochemistry Performance Tracker” in an EXISTING repo (a duplicated repo from a previous Telegram miniapp project).
-You MUST reuse existing infra: Telegram initData auth, Supabase client, UI patterns, deployment setup. Do not reinvent.
+# habby — Neurochemistry Performance Tracker
+## Architecture Reference for AI Assistants
 
-## WHAT YOU MUST DO FIRST
-1) Read `/claude.md` in the repo (current). Read it fully.
-2) Scan repo for:
-   - Telegram initData auth verification (server route / middleware / utils)
-   - Supabase client setup (client + server)
-   - Existing DB tables/migrations
-   - Any existing “subscriptions tracker” UI components (to reuse layout, safe-area fixes, styling)
-3) Then implement the MVP using the existing patterns. Only add what’s needed.
-4) Output only the code changes and migration SQL files required.
+This document describes the **actual implemented state** of the codebase. It supersedes any prior specification documents. Do not assume intended vs. actual — read this file and then the source.
 
 ---
 
-# HARD CONSTRAINTS
-- Do NOT change the underlying methodology/protocol logic. Only implement product mechanics around it.
-- Single user expected, but DO NOT weaken security:
-  - NEVER put Supabase service_role in client
-  - Use RLS properly
-  - Telegram initData must be verified server-side
-- Must work well in iOS Telegram (safe-area, no overlap).
-- Day boundary: 05:00 (logical day).
-- Check-ins should be fast, clicker-first, anti-shame (no penalties).
+## Tech Stack
+
+| Layer | Technology | Version |
+|---|---|---|
+| Framework | Next.js App Router | 16.1.6 |
+| React | React | 19.2.3 |
+| Database | Supabase (PostgreSQL) | @supabase/supabase-js ^2.98.0 |
+| Styling | Tailwind CSS | 4.x |
+| Language | TypeScript | 5.9.3 |
+| Font | Geist Sans / Geist Mono | 1.7.0 |
+| Deployment | Vercel | — |
+
+No middleware.ts. No Supabase Auth (JWT). Auth is Telegram initData + service-role Supabase client on the server.
 
 ---
 
-# PRODUCT REQUIREMENTS (LOCKED)
+## Directory Layout
 
-## Day boundary
-- Logical date = date part of (now - 5 hours) in user timezone.
-- All “today”, XP, streaks use logical date.
-
-## Reminders
-- Morning push: 08:30 local
-- Evening push: 23:30 local
-Each message includes button opening the miniapp check-in.
-
-Implement reminders via Vercel Cron hitting API routes that call Telegram Bot API.
-
-## Daily tracking fields
-Core:
-- wake_time (time)
-- sleep_time (time)
-- phone_free_min (0/15/30/60)
-- caffeine_cups (int)
-- nicotine_count (int)
-- calories (int)
-- protein_g (int)
-- water_ml (int)
-- training_type ('none'|'swim'|'gym'|'home')
-
-Optional:
-- resting_hr (int)
-- weight_kg (numeric)
-
-Vitamins (booleans):
-- vitamins_adam
-- magnesium
-- l_theanine
-
-Alcohol:
-- alcohol_yes (boolean). “No alcohol” means false.
-
-## Goals (editable in UI, future-only, versioned)
-Default goal values (create automatically if none exist):
-- caffeine_cups <= 2
-- nicotine_count <= 20
-- water_ml >= 2000
-- protein_g >= 150
-- calories == 2700 (treat as target range, see below)
-- alcohol_yes == false
-- vitamins_adam == true
-- magnesium == true
-- l_theanine == true (ONLY if caffeine_cups > 0; otherwise treat as N/A and do not evaluate)
-
-Goals rules:
-- Goal edits apply ONLY from a future effective date (tomorrow or later). No retro changes.
-- Store goal versions.
-- On date D, pick the latest goal version where effective_from <= D.
-- Persist per-day evaluation with deltas, so later goal changes don’t rewrite history.
-
-Calories goal evaluation:
-- Use a tolerance band to avoid self-abuse: target 2700 with +/- 10% (2430–2970) counts as “met”.
-- Store delta as (actual - target) numeric.
-
-## Gamification (XP only, no penalties)
-XP events are idempotent; avoid farming.
-XP actions:
-- Quick check-in saved: +20 XP
-- Full check-in saved: +35 XP
-  Criteria for “full”: daily log contains nicotine+caffeine+water+calories+protein AND at least one of wake_time/sleep_time.
-- Backfill day saved: +15 XP (when editing a past date)
-- Phone-free >=30 min: +10 XP (once/day)
-- Caffeine goal met: +10 XP (once/day)
-- Nicotine goal met: +10 XP (once/day)
-- Weekly training goal: if >=2 sessions in last 7 logical days, award +40 XP once per ISO week.
-
-Streak:
-- A day counts “logged” if there is a daily_logs row for that logical date.
-- Streak increments on consecutive logged logical days.
-- Shield: 1 missed day per ISO week does not reset streak (auto). Missing >1 day breaks streak.
-
-Backfill window:
-- Backfill allowed up to 7 days.
-- Backfill counts toward streak ONLY if entered within 72 hours of that date.
-
-## “Me vs me” stats
-Stats screen shows This week vs Last week:
-- days logged
-- avg nicotine/day
-- avg caffeine/day
-- avg calories
-- avg protein
-- avg water
-- avg wake time + basic consistency (optional: std dev)
-- training count
-
-## Anti-shame UI
-- No red failures.
-- No negative XP.
-- If alcohol_yes = true: do not punish; just show neutral note and still allow logging XP.
+```
+/
+├── app/
+│   ├── globals.css              # Tailwind 4 + CSS vars (dark/light, safe-area)
+│   ├── layout.tsx               # Root layout: Geist font, viewport cover, NavBar
+│   ├── page.tsx                 # Home: clickers + XPBar + GoalChips + StreakBadge
+│   ├── checkin/page.tsx         # Full check-in form (supports ?date= backfill)
+│   ├── history/page.tsx         # Last 7 logical days list
+│   ├── goals/page.tsx           # Current goals + next-version editor
+│   ├── stats/page.tsx           # This week vs last week comparison
+│   └── api/
+│       ├── auth/telegram/route.ts   # POST: HMAC-SHA256 Telegram initData verify
+│       ├── me/route.ts              # GET: upsert user, return internal UUID
+│       ├── logs/route.ts            # GET/POST: daily log upsert + XP engine
+│       ├── xp/route.ts             # GET: XP totals, level, streak
+│       ├── stats/route.ts          # GET: week aggregates
+│       ├── goals/route.ts          # GET/POST: versioned goal management
+│       ├── evaluations/route.ts    # GET: daily_goal_evaluations for a date
+│       └── cron/
+│           ├── morning/route.ts    # GET: Telegram reminder (05:30 UTC)
+│           └── evening/route.ts    # GET: Telegram reminder (20:30 UTC)
+├── components/
+│   ├── Clicker.tsx              # Increment/decrement widget with emoji label
+│   ├── XPBar.tsx               # Level + XP progress bar
+│   ├── GoalChips.tsx           # Inline chips showing goal evaluation status
+│   ├── StreakBadge.tsx         # Streak count + shield indicator
+│   └── NavBar.tsx              # Fixed bottom nav (5 tabs, iOS safe-area)
+├── hooks/
+│   └── useAuth.ts              # Telegram auth hook + apiHeaders helper
+├── lib/
+│   ├── supabaseServer.ts       # Service-role Supabase singleton + getUserId()
+│   ├── logicalDate.ts          # Day boundary logic (05:00 offset)
+│   ├── streak.ts               # Streak computation (ISO-week shield)
+│   ├── xpEngine.ts             # XP award functions (all idempotent)
+│   ├── defaultGoals.ts         # Creates default goal version if none exists
+│   └── telegram.ts             # Telegram Mini App env detection + initData helpers
+├── types/
+│   └── database.ts             # TypeScript interfaces for all DB rows
+├── supabase/
+│   └── migrations/
+│       └── 001_neurochemistry_tracker.sql  # Complete schema with RLS
+├── docs/
+│   └── SETUP.md                # Deployment guide
+└── vercel.json                 # Cron schedules
+```
 
 ---
 
-# MVP UX SCREENS (MUST IMPLEMENT)
+## Database Schema
 
-## Screen 1: Home (Today)
-- XP today
-- Level progress bar (simple: level = floor(totalXP / 500) + 1)
-- Current streak + shield status
-- “Today Contract” chips (today’s goals)
-- Clickers:
-  - 🚬 +1, +5, -1
-  - 💧 +250, +500
-  - ☕ +1, -1
-  - 🍽 Calories +200, +500
-  - 🥩 Protein +25, +50
-- Buttons:
-  - Quick Check-in
-  - Full Check-in (expand)
-  - History (last 7 days)
-  - Goals (Next Contract)
+Migration file: `supabase/migrations/001_neurochemistry_tracker.sql`
 
-## Screen 2: Check-in (Quick + Expand)
-Quick fields:
-- nicotine_count (clicker)
-- caffeine_cups (clicker)
-- calories (clicker + manual)
-- protein_g (clicker + manual)
-- water_ml (clicker)
-- wake_time (default now, editable)
-- sleep_time (editable)
-- phone_free_min (0/15/30/60)
-- training_type toggle
-- vitamins toggles (3)
-- alcohol toggle
+### Table: `users`
+```sql
+id               uuid        primary key default gen_random_uuid()
+telegram_user_id bigint      unique not null
+created_at       timestamptz not null default now()
+```
+Maps Telegram user IDs to internal UUIDs. All other tables reference `users.id`.
 
-## Screen 3: History (last 7 days)
-- list last 7 logical dates with badges (logged / backfilled)
-- tap to edit day
-- enforce backfill <= 7 days
+### Table: `daily_logs`
+```sql
+id              uuid         primary key default gen_random_uuid()
+user_id         uuid         not null references users(id) on delete cascade
+date            date         not null
 
-## Screen 4: Goals (Next Contract)
-- Show current goal version (read-only)
-- Create/Edit next goal version:
-  - Effective date (tomorrow default; allow pick future date)
-  - Targets editable for:
-    - nicotine max
-    - caffeine max
-    - water min
-    - protein min
-    - calories target (2700 default)
-    - alcohol free (bool)
-    - vitamins required (bools)
-- Save creates new goal version; does not alter past evaluations.
+wake_time       time         null
+sleep_time      time         null
 
-## Screen 5: Stats
-- This week vs Last week (cards)
-- Basic charts (optional, minimal): nicotine, caffeine, calories, protein, water.
+phone_free_min  int          null  -- CHECK: in (0, 15, 30, 60)
+caffeine_cups   int          not null default 0  -- CHECK: >= 0
+nicotine_count  int          not null default 0  -- CHECK: >= 0
+calories        int          null  -- CHECK: >= 0
+protein_g       int          null  -- CHECK: >= 0
+water_ml        int          not null default 0  -- CHECK: >= 0
 
----
+training_type   text         not null default 'none'
+                             -- CHECK: in ('none','swim','gym','home')
 
-# IMPLEMENTATION DETAILS (YOU MUST EXECUTE)
+resting_hr      int          null  -- CHECK: 30–200 (nullable allowed)
+weight_kg       numeric(5,2) null  -- CHECK: 30–300 (nullable allowed)
 
-## 1) Database + RLS (Supabase) — SQL migrations
-Add migrations (Supabase CLI style if repo uses it; otherwise add `/supabase/migrations/*.sql` similarly).
+vitamins_adam   boolean      not null default false
+magnesium       boolean      not null default false
+l_theanine      boolean      not null default false
+alcohol_yes     boolean      not null default false
 
-### A) Table: daily_logs
-Columns:
-- id uuid primary key default gen_random_uuid()
-- user_id uuid not null
-- date date not null
-- wake_time time null
-- sleep_time time null
-- phone_free_min int null
-- caffeine_cups int not null default 0 check (caffeine_cups >= 0)
-- nicotine_count int not null default 0 check (nicotine_count >= 0)
-- calories int null check (calories >= 0)
-- protein_g int null check (protein_g >= 0)
-- water_ml int not null default 0 check (water_ml >= 0)
-- training_type text not null default 'none' check (training_type in ('none','swim','gym','home'))
-- resting_hr int null check (resting_hr >= 30 and resting_hr <= 200)
-- weight_kg numeric(5,2) null check (weight_kg >= 30 and weight_kg <= 300)
-- vitamins_adam boolean not null default false
-- magnesium boolean not null default false
-- l_theanine boolean not null default false
-- alcohol_yes boolean not null default false
-- created_at timestamptz not null default now()
-- updated_at timestamptz not null default now()
-Constraints:
-- unique(user_id, date)
+created_at      timestamptz  not null default now()
+updated_at      timestamptz  not null default now()
 
-Add trigger to update updated_at on update.
+UNIQUE (user_id, date)
+```
+`updated_at` is automatically refreshed by trigger `daily_logs_updated_at` which calls `set_updated_at()`.
 
-### B) Goals tables (versioned)
-Table: goals
-- id uuid pk default gen_random_uuid()
-- user_id uuid not null
-- effective_from date not null
-- created_at timestamptz default now()
-- unique(user_id, effective_from)
+### Table: `goals`
+```sql
+id             uuid        primary key default gen_random_uuid()
+user_id        uuid        not null references users(id) on delete cascade
+effective_from date        not null
+created_at     timestamptz not null default now()
 
-Table: goal_items
-- id uuid pk default gen_random_uuid()
-- goal_id uuid not null references goals(id) on delete cascade
-- metric_key text not null
-- operator text not null check (operator in ('<=','>=','==','range'))
-- target_number numeric null
-- target_bool boolean null
-- tolerance_number numeric null  -- used for range goals (e.g., calories)
-- xp_reward int not null default 10
-- xp_cap int null
-- is_active boolean not null default true
+UNIQUE (user_id, effective_from)
+```
+One row per goal version. To pick the active version for date D: latest `effective_from <= D`.
 
-Metric keys to support:
-- nicotine_count (<=)
-- caffeine_cups (<=)
-- water_ml (>=)
-- protein_g (>=)
-- calories (range) with target_number=2700 and tolerance_number=0.10
-- alcohol_yes (== false)
-- vitamins_adam (== true)
-- magnesium (== true)
-- l_theanine (== true, but N/A if caffeine_cups == 0)
+### Table: `goal_items`
+```sql
+id               uuid        primary key default gen_random_uuid()
+goal_id          uuid        not null references goals(id) on delete cascade
+metric_key       text        not null
+operator         text        not null  -- CHECK: in ('<=', '>=', '==', 'range')
+target_number    numeric     null
+target_bool      boolean     null
+tolerance_number numeric     null  -- fractional, e.g. 0.10 = ±10%
+xp_reward        int         not null default 10
+xp_cap           int         null
+is_active        boolean     not null default true
+```
+No primary key uniqueness on `(goal_id, metric_key)` — upserts delete all items then re-insert.
 
-### C) Goal evaluation persistence
-Table: daily_goal_evaluations
-- id uuid pk default gen_random_uuid()
-- user_id uuid not null
-- date date not null
-- goal_id_used uuid not null references goals(id)
-- metric_key text not null
-- actual_number numeric null
-- actual_bool boolean null
-- target_number numeric null
-- target_bool boolean null
-- delta_number numeric null
-- met boolean not null
-- xp_awarded int not null default 0
-- created_at timestamptz default now()
-Constraints:
-- unique(user_id, date, metric_key)
+**Default goal items** (created by `lib/defaultGoals.ts` on first `GET /api/goals`):
 
-### D) XP events (idempotent)
-Table: xp_events
-- id uuid pk default gen_random_uuid()
-- user_id uuid not null
-- date date not null
-- event_type text not null
-- xp int not null check (xp >= 0)
-- meta jsonb null
-- created_at timestamptz default now()
+| metric_key | operator | target_number | target_bool | tolerance_number | xp_reward |
+|---|---|---|---|---|---|
+| nicotine_count | <= | 20 | — | — | 10 |
+| caffeine_cups | <= | 2 | — | — | 10 |
+| water_ml | >= | 2000 | — | — | 10 |
+| protein_g | >= | 150 | — | — | 10 |
+| calories | range | 2700 | — | 0.10 | 10 |
+| alcohol_yes | == | — | false | — | 10 |
+| vitamins_adam | == | — | true | — | 10 |
+| magnesium | == | — | true | — | 10 |
+| l_theanine | == | — | true | — | 10 |
 
-Uniqueness for idempotency:
-- unique(user_id, date, event_type)
+### Table: `daily_goal_evaluations`
+```sql
+id            uuid        primary key default gen_random_uuid()
+user_id       uuid        not null references users(id) on delete cascade
+date          date        not null
+goal_id_used  uuid        not null references goals(id)
+metric_key    text        not null
+actual_number numeric     null
+actual_bool   boolean     null
+target_number numeric     null
+target_bool   boolean     null
+delta_number  numeric     null      -- actual - target (numeric goals)
+met           boolean     not null
+xp_awarded    int         not null default 0
+created_at    timestamptz not null default now()
 
-Event types to implement:
-- checkin_quick
-- checkin_full
-- checkin_backfill
-- bonus_phone_free_30
-- bonus_goal_caffeine
-- bonus_goal_nicotine
-- weekly_training_bonus
+UNIQUE (user_id, date, metric_key)
+```
+Written on every `POST /api/logs`. The `UNIQUE` constraint makes upserts idempotent. Past rows are never modified when goals change.
 
-### E) Aggregate view or helper (optional)
-You may create a view for:
-- total_xp per user
-- xp_today
-- current_streak (can be computed server-side)
+### Table: `xp_events`
+```sql
+id          uuid        primary key default gen_random_uuid()
+user_id     uuid        not null references users(id) on delete cascade
+date        date        not null
+event_type  text        not null
+xp          int         not null  -- CHECK: >= 0
+meta        jsonb       null
+created_at  timestamptz not null default now()
 
-### RLS
-Enable RLS on all tables.
-Policies:
-- daily_logs: user_id = auth.uid()
-- goals/goal_items: user owns goals via goals.user_id = auth.uid()
-- daily_goal_evaluations: user_id = auth.uid()
-- xp_events: user_id = auth.uid()
-
-## 2) Server-side logic (Next.js App Router)
-Implement server actions or API routes (prefer server actions for app router) for:
-
-### A) getLogicalDate()
-Utility:
-- logicalDate = new Date(Date.now() - 5*60*60*1000)
-- return yyyy-mm-dd
-
-Use it consistently.
-
-### B) Upsert daily log
-Function:
-- upsert row by (user_id, date)
-- return the saved row
-
-### C) Award XP (idempotent)
-On save:
-- Determine if date is today or backfill.
-- Insert xp_events with unique constraints to prevent duplicates.
-
-Rules:
-- If editing date < today:
-  - insert `checkin_backfill` once for that day
-- Insert checkin_quick or checkin_full based on criteria (idempotent).
-- If phone_free_min >= 30 → award bonus_phone_free_30
-- Evaluate goals for that date (see below) and persist daily_goal_evaluations:
-  - Determine goal version used for that date
-  - Compute met + delta for each active goal_item
-  - Store evaluation row per metric_key (upsert)
-  - Award XP events for caffeine + nicotine met (as per spec) via xp_events
-  - Vitamins/alcohol/calories/protein/water goal XP: DO NOT add extra XP beyond the listed ones in MVP unless you decide to add as “future”, but keep it minimal. For now, only the spec’d daily bonuses + logging XP.
-  - However still persist evaluations for all metrics for UI.
-
-Special rule:
-- l_theanine evaluation is N/A if caffeine_cups == 0:
-  - store met=true and delta null OR store met=true with meta “na”
-  - do not award/withhold any XP based on it
-
-Weekly training bonus:
-- Once per ISO week:
-  - Count daily_logs in last 7 logical days with training_type != 'none'
-  - If >=2 → insert weekly_training_bonus with date = logicalDate
-  - Use event_type uniqueness plus a “week key” in meta if needed (or create additional unique constraint per week; simplest: event_type = `weekly_training_bonus_YYYY-WW`).
-
-### D) Streak computation
-Compute streak server-side:
-- Get recent 30 days of daily_logs ordered by date desc.
-- Determine logged days by existence.
-- Apply shield:
-  - For current ISO week: allow 1 missed day without breaking streak.
-  - For previous weeks: streak breaks as soon as there is a gap > allowed shield in that week.
-Simpler MVP acceptable:
-- Compute streak as consecutive logged days from today backward,
-  allowing one skip within current ISO week.
-Persist streak value in a computed endpoint, no need table.
-
-### E) Goals editing (future-only)
-UI saves a new goals row:
-- effective_from must be >= tomorrow (logical tomorrow).
-- Create goal record + goal_items for all targets.
-- Do not modify past evaluations.
-- After saving goals, future days will use that version.
-
-### F) Telegram reminders via cron endpoints
-Create API routes:
-- `/api/cron/morning`
-- `/api/cron/evening`
-Secured by a secret token (CRON_SECRET) in headers/query.
-They call Telegram Bot API sendMessage to the single user (chat_id from env).
-Message includes an inline button that opens the miniapp (web_app).
-Use existing bot token env.
-
-Env vars (server only):
-- TELEGRAM_BOT_TOKEN
-- TELEGRAM_CHAT_ID (single user)
-- CRON_SECRET
-- SUPABASE_SERVICE_ROLE_KEY (server only, if needed for cron; prefer anon + user session where possible; cron can be server role if only sending message)
-- SUPABASE_URL
-- SUPABASE_ANON_KEY
-
-## 3) Client UI (React, Telegram miniapp)
-Reuse existing UI framework in repo.
-
-Requirements:
-- iOS safe-area handling (use env(safe-area-inset-*) or existing patterns)
-- Fast interactions (clickers)
-- Visible immediate feedback on Save (+XP breakdown)
-- History editing with date selector (last 7 days)
-
-### Home
-- show today totals + clickers
-- show XP today, total XP, level, streak, shield icon
-- show goal chips for today (from evaluations or from goal version)
-
-### Check-in
-- quick mode default
-- expandable sections:
-  - Sleep
-  - Health (HR/weight)
-  - Vitamins
-  - Alcohol
-- Save button with success toast
-
-### Goals screen
-- show current goals
-- edit next goals:
-  - nicotine max
-  - caffeine max
-  - water min
-  - protein min
-  - calories target (default 2700)
-  - alcohol free bool
-  - vitamins required bools
-- effective date picker default tomorrow
-- enforce future-only with validation message
-
-### Stats
-- compute week aggregates from daily_logs
-- show week-over-week cards
+UNIQUE (user_id, date, event_type)
+```
+Idempotency is enforced by the unique constraint. All writes use `upsert(..., { ignoreDuplicates: true })`.
 
 ---
 
-# QA CHECKLIST (YOU MUST DO)
-- Test iOS Telegram safe-area: no overlapping top buttons, no clipped Save.
-- Verify Telegram initData auth still works.
-- Verify RLS blocks unauthenticated access.
-- Verify no service role key shipped to client bundle.
-- Verify XP events are idempotent (saving multiple times doesn’t farm XP).
-- Verify logical day at 05:00 works (simulate late-night usage).
-- Verify backfill:
-  - can edit last 7 days
-  - streak credit only within 72h rule
+## RLS Policies
+
+RLS is enabled on all 6 tables. **There is no Supabase Auth JWT.** All policies resolve the user via a custom PostgreSQL setting:
+
+```sql
+current_setting('app.telegram_user_id', true)
+```
+
+The API routes do **not** set this setting directly — they use the service-role client (`SUPABASE_SERVICE_ROLE_KEY`), which bypasses RLS entirely. RLS policies exist to block direct database access from unauthenticated clients.
+
+Policy pattern (same for `daily_logs`, `goals`, `daily_goal_evaluations`, `xp_events`):
+```sql
+using (user_id = (
+  select id from users
+  where telegram_user_id = nullif(current_setting('app.telegram_user_id', true), '')::bigint
+))
+```
+
+`goal_items` policy joins through `goals`:
+```sql
+using (goal_id in (
+  select id from goals where user_id = (
+    select id from users where telegram_user_id = nullif(current_setting(...), '')::bigint
+  )
+))
+```
 
 ---
 
-# ACCEPTANCE CRITERIA
-1) A user can open miniapp and submit a daily log in <60 seconds using clickers.
-2) Goals can be edited in UI for future date only; past does not change.
-3) daily_goal_evaluations are stored per day and remain stable after goal changes.
-4) XP + Level + Streak + Shield behave as spec.
-5) Telegram morning/evening reminders work via cron endpoints.
-6) Calories target is stored and evaluated as range (±10%).
-7) Vitamins and alcohol toggles are tracked and stored daily.
-8) “This week vs last week” stats screen works with real data.
+## Authentication
+
+### Server: Telegram initData HMAC-SHA256
+
+File: `app/api/auth/telegram/route.ts`
+
+**POST `/api/auth/telegram`** — Body: `{ initData: string }`
+
+Two initData formats are handled:
+- **Wrapper** (from URL pass-through): `tgWebAppData=<percent-encoded>&tgWebAppVersion=...`
+  → extracted via regex, single `decodeURIComponent` pass
+- **Raw**: standard `query_id=...&user=...&auth_date=...&hash=...`
+
+Verification steps:
+1. Parse as URLSearchParams, extract `hash`
+2. Delete `hash` from params
+3. Sort remaining entries alphabetically, join as `key=value\n`
+4. `secret_key = HMAC-SHA256("WebAppData", TELEGRAM_BOT_TOKEN)`
+5. `computed = HMAC-SHA256(data_check_string, secret_key)` → hex
+6. Timing-safe compare via `crypto.timingSafeEqual()`
+
+Returns: `{ telegram_user_id, username, first_name, last_name }` or 401.
+
+### Server: User Resolution
+
+File: `lib/supabaseServer.ts`
+
+```typescript
+getSupabase()   // Lazily initialised service-role client singleton
+getUserId(telegramUserId: number): Promise<string>
+  // SELECT id FROM users WHERE telegram_user_id = ?
+  // If not found: INSERT INTO users (telegram_user_id) and return new id
+```
+
+All API routes call `getUserId(tgId)` to resolve the internal UUID before any DB query.
+
+### Client: Auth Hook
+
+File: `hooks/useAuth.ts`
+
+States: `"checking" | "authed" | "no_initdata" | "invalid_initdata" | "error"`
+
+Fast path: if `localStorage["tg_user_id"]` and `localStorage["habby_user_id"]` exist, skip the auth roundtrip and emit `"authed"` immediately.
+
+Slow path: retries `window.Telegram.WebApp` detection up to 10 times (200ms intervals), then calls `POST /api/auth/telegram` → `GET /api/me`, caches results in localStorage.
+
+Helper exported from the same file:
+```typescript
+apiHeaders(telegramUserId: number | null): HeadersInit
+// Returns { "Content-Type": "application/json", "x-telegram-user-id": "..." }
+```
+
+All page components pass `x-telegram-user-id` header to every API call. API routes read it via `req.headers.get("x-telegram-user-id")`.
 
 ---
 
-# IMPORTANT IMPLEMENTATION NOTE
-Because this repo is a duplicate of a previous miniapp, you MUST:
-- reuse existing layout, theming, safe-area logic, and Telegram integration
-- avoid large refactors
-- add only necessary new components and pages
-- keep code style consistent with existing project conventions
+## Logical Day Boundary
 
-Proceed to implement now.
+File: `lib/logicalDate.ts`
 
-## OUTPUT REQUIREMENTS (DOCUMENTATION)
-Along with code changes, create `docs/SETUP.md` that includes:
-1) Supabase project creation steps (dashboard)
-2) Where to paste SQL migrations (Supabase CLI or SQL editor) based on repo setup:
-   - If repo uses Supabase CLI: commands `supabase init`, `supabase link`, `supabase db push`
-   - Otherwise: “SQL Editor → run migrations in order”
-3) How to enable RLS and verify policies (include SQL checks)
-4) Required environment variables for:
-   - Next.js (client + server)
-   - Vercel
-   - Telegram bot
-   - Cron security secret
-5) How to set Vercel Cron schedules for morning/evening endpoints
-6) How to obtain Telegram Chat ID for the single user (safe method)
-7) Verification checklist: auth works, RLS works, cron works, iOS safe-area ok
+The logical day starts at **05:00** (not midnight). Every date-related operation subtracts 5 hours from UTC before extracting the date component.
+
+```typescript
+getLogicalDate(): string
+  // new Date(Date.now() - 5*60*60*1000).toISOString().slice(0, 10)
+
+getLogicalDateFor(ts: number | string): string
+  // Same offset applied to a specific timestamp
+
+isoWeek(dateStr: string): string
+  // Returns "YYYY-WW" using Jan 4 anchor method (ISO 8601 weeks)
+
+addDays(dateStr: string, n: number): string
+  // Date arithmetic using T12:00:00Z to avoid DST edge cases
+
+dateDiff(a: string, b: string): number
+  // (a - b) in days, also uses T12:00:00Z
+```
+
+All API routes that involve dates call `getLogicalDate()` for "today". The client passes explicit date strings (YYYY-MM-DD) in request bodies.
+
+---
+
+## XP Engine
+
+File: `lib/xpEngine.ts`
+
+All functions take a service-role `SupabaseClient`. All XP writes use:
+```typescript
+sb.from("xp_events").upsert(
+  { user_id, date, event_type, xp, meta },
+  { onConflict: "user_id,date,event_type", ignoreDuplicates: true }
+)
+```
+
+### Event Types and Amounts
+
+| event_type | XP | Trigger condition |
+|---|---|---|
+| `checkin_quick` | +20 | Log saved and not "full" |
+| `checkin_full` | +35 | Log saved and qualifies as full |
+| `checkin_backfill` | +15 | Log date < logical today |
+| `bonus_phone_free_30` | +10 | `phone_free_min >= 30` |
+| `bonus_goal_caffeine` | +10 | `caffeine_cups` goal met |
+| `bonus_goal_nicotine` | +10 | `nicotine_count` goal met |
+| `weekly_training_YYYY-WW` | +40 | ≥2 training sessions in last 7 days |
+
+Note: `checkin_quick` and `checkin_full` are mutually exclusive on any given date (unique constraint). `checkin_backfill` stacks with one of them.
+
+**Full check-in criteria** (`isFull()`):
+- `calories != null` AND `protein_g != null` AND `nicotine_count` defined AND `caffeine_cups` defined AND `water_ml` defined
+- AND at least one of `wake_time` or `sleep_time` is non-null
+
+**Weekly training bonus**: event_type includes the ISO week string (`weekly_training_2026-W09`). Uniqueness is `(user_id, date, event_type)` — the date is the current logical today when awarded. Multiple saves on different days in the same week can each trigger the check; the event_type being per-week means different dates would not conflict. Count is from `daily_logs` where `training_type != 'none'` in the last 7 days (`date >= today - 6`).
+
+### Goal Evaluation (`evaluateAndPersistGoals`)
+
+1. Find applicable goal version: latest `goals.effective_from <= date`
+2. Load all `goal_items` where `is_active = true`
+3. For each item, call `evaluateMetric()`:
+   - `operator == "=="` + `target_bool`: boolean equality
+   - `operator == "range"`: `|actual - target| <= target * tolerance`
+   - `operator == "<="` or `">="`: numeric comparison
+   - Special: `l_theanine` is auto-`met=true, xp_awarded=0` when `caffeine_cups == 0`
+4. Upsert `daily_goal_evaluations` row (conflict on `user_id,date,metric_key`)
+5. Award XP events **only for `caffeine_cups` and `nicotine_count`** goals (not vitamins, alcohol, calories, protein, water)
+
+### XP Computation (`GET /api/xp`)
+
+```typescript
+totalXp = sum(xp_events.xp) for user
+xpToday = sum where date == logicalToday
+level = floor(totalXp / 500) + 1
+xpIntoLevel = totalXp % 500
+xpForNextLevel = 500  // constant
+```
+
+Streak is computed from `daily_logs.date` for last 30 days (not from `xp_events`).
+
+---
+
+## Streak Algorithm
+
+File: `lib/streak.ts`
+
+```typescript
+computeStreak(loggedDates: string[], today: string): { streak: number, shieldActive: boolean }
+```
+
+Walks backward from `today` for up to 60 days:
+
+1. For each day (i = 0..59), check `logged.has(date)`
+2. If logged: `streak++`, continue
+3. If not logged: check `shieldUsed` map for this ISO year+week key
+   - If shield not yet used for this week: mark used, continue (shield consumed)
+   - If in current week: set `shieldActive = true`
+   - If shield already used for this week: **break** (streak ends)
+
+`shieldActive = true` means the user's current-week shield has already been consumed (one missed day was forgiven). The streak count does not include the shielded day itself — it only counts logged days.
+
+Input `loggedDates` comes from `daily_logs.date` filtered to the last 30 days. Only dates with an existing log row count as "logged".
+
+---
+
+## API Routes
+
+All routes except `/api/auth/telegram` and `/api/cron/*` require `x-telegram-user-id` header (Telegram user ID as a number string).
+
+### `POST /api/auth/telegram`
+- Body: `{ initData: string }`
+- Returns: `{ telegram_user_id, username, first_name, last_name }`
+- No auth header required
+
+### `GET /api/me`
+- Returns: `{ user_id: string }` (internal UUID)
+
+### `GET /api/logs`
+- `?date=YYYY-MM-DD` → returns single log row or `null`
+- `?from=YYYY-MM-DD&to=YYYY-MM-DD` → returns array ordered by date desc
+
+### `POST /api/logs`
+- Body: all `daily_logs` fields (all optional, defaults applied)
+- `date` field optional (defaults to logical today)
+- Validation: `date > today` → 400; `date < today - 7 days` → 400
+- On success: runs XP engine (errors swallowed, don't fail the request)
+- Returns: `{ log: DailyLog, xpEarned: number }`
+
+XP engine call order on POST:
+```
+awardCheckinXP(sb, userId, date, today, payload)
+awardBonusXP(sb, userId, date, payload)
+evaluateAndPersistGoals(sb, userId, date, payload)
+checkWeeklyTrainingBonus(sb, userId, today)
+```
+
+### `GET /api/xp`
+- Returns: `{ totalXp, xpToday, level, xpIntoLevel, xpForNextLevel, streak, shieldActive }`
+
+### `GET /api/goals`
+- `?date=YYYY-MM-DD` (default: logical today)
+- Calls `ensureDefaultGoals(sb, userId)` on every GET
+- Returns: `{ id, effective_from, items: GoalItem[] }` or `null`
+
+### `POST /api/goals`
+- Body: `{ effective_from?: string, items: [{ metric_key, operator, target_number?, target_bool?, tolerance_number?, xp_reward? }] }`
+- Validation: `effective_from` must be > logical today (tomorrow minimum)
+- Upserts `goals` row, then deletes all old `goal_items` and re-inserts
+- Returns: `{ id, effective_from, items }`
+
+### `GET /api/evaluations`
+- `?date=YYYY-MM-DD` (required)
+- Returns: array of `daily_goal_evaluations` rows for that date
+
+### `GET /api/stats`
+- Returns:
+  ```typescript
+  {
+    this_week: { days_logged, avg_nicotine, avg_caffeine, avg_calories,
+                 avg_protein, avg_water, training_count, from, to },
+    last_week: { /* same shape */ }
+  }
+  ```
+- "This week" = last 7 logical days ending today
+- "Last week" = 7 days before that
+- Averages are `Math.round()`, null if no data for the period
+
+### `GET /api/cron/morning` and `GET /api/cron/evening`
+- Auth: `x-vercel-cron` header present OR `Authorization: Bearer <CRON_SECRET>`
+- Sends Telegram `sendMessage` with inline `web_app` button to `TELEGRAM_CHAT_ID`
+- Returns: `{ ok: true, period: "morning" | "evening" }`
+
+---
+
+## Cron Schedules
+
+File: `vercel.json`
+```json
+{
+  "crons": [
+    { "path": "/api/cron/morning", "schedule": "30 5 * * *" },
+    { "path": "/api/cron/evening", "schedule": "30 20 * * *" }
+  ]
+}
+```
+
+- `30 5 * * *` = 05:30 UTC ≈ 08:30 Moscow (UTC+3)
+- `30 20 * * *` = 20:30 UTC ≈ 23:30 Moscow (UTC+3)
+
+Cron only fires on Vercel production deployments.
+
+---
+
+## Environment Variables
+
+### Server-only (never exposed to client bundle)
+```
+SUPABASE_URL                 Supabase project URL
+SUPABASE_SERVICE_ROLE_KEY    Service role key (bypasses RLS)
+TELEGRAM_BOT_TOKEN           Bot token from BotFather
+TELEGRAM_CHAT_ID             Telegram chat ID of the single user
+CRON_SECRET                  Random secret for cron endpoint auth
+```
+
+### Client-safe (must be prefixed NEXT_PUBLIC_)
+```
+NEXT_PUBLIC_APP_URL          Deployed app URL (used in cron reminder button)
+```
+
+`SUPABASE_ANON_KEY` is **not used** — the app uses service-role for all server operations. There is no client-side Supabase SDK usage.
+
+---
+
+## UI Components
+
+### `Clicker`
+Props: `label`, `value`, `unit?`, `increments: number[]`, `onAdd(n)`, `onSub?(n)`
+Renders emoji label + current value + decrement/increment buttons. Decrement is disabled at 0.
+
+### `XPBar`
+Props: `totalXp`, `xpToday`, `level`, `xpIntoLevel`, `xpForNextLevel`
+Renders level badge, XP today (green), total XP, and CSS progress bar.
+
+### `GoalChips`
+Props: `evaluations: DailyGoalEvaluation[]`
+Renders inline chips. Green = met, muted = not met. Emoji per metric key.
+
+### `StreakBadge`
+Props: `streak`, `shieldActive`
+Renders "🔥 N day streak" with optional "🛡" shield emoji.
+
+### `NavBar`
+Fixed bottom navigation: Home / Log / History / Goals / Stats.
+Uses `env(safe-area-inset-bottom)` for iOS Telegram safe area.
+
+---
+
+## Styling Conventions
+
+File: `app/globals.css` (Tailwind CSS 4)
+
+CSS variables (auto dark/light via `prefers-color-scheme`):
+```css
+--bg-page, --bg-card, --bg-input
+--text, --text-muted
+--border, --input-border
+--accent: #00FF85   /* neon green */
+```
+
+Safe area in root layout (`app/layout.tsx`):
+```typescript
+viewport: { viewportFit: "cover" }  // Next.js metadata export
+```
+
+NavBar bottom padding: `pb-[env(safe-area-inset-bottom)]`
+
+---
+
+## Key Conventions
+
+- **All date strings are `YYYY-MM-DD`**, never `Date` objects passed across boundaries.
+- **All times use `T12:00:00Z`** anchor when constructing `Date` objects from date strings (avoids DST off-by-one).
+- **No client-side Supabase**: all DB access goes through API routes using the service-role singleton in `lib/supabaseServer.ts`.
+- **XP errors are non-fatal**: `POST /api/logs` wraps the entire XP engine in try/catch and returns `xpEarned: 0` if it fails, but still returns the saved log.
+- **Goal evaluation is re-run on every save**: upsert semantics on `daily_goal_evaluations` mean re-saving a day recalculates evaluations. Past evaluations are stable only once you stop editing that day.
+- **Default goals are created lazily**: `ensureDefaultGoals()` runs on every `GET /api/goals`. If a goals row already exists for the user, it returns immediately (SELECT id LIMIT 1 check).
+- **No penalties**: XP check is always `xp >= 0` (DB constraint). No negative XP events exist in the engine.
+- **Anti-shame**: `alcohol_yes = true` is stored and evaluated against the goal, but no XP is docked. The goal evaluation just records `met: false`.
+
+---
+
+## Development Workflow
+
+```bash
+npm run dev     # Next.js dev server
+npm run build   # Production build
+npm run lint    # ESLint
+```
+
+Path alias `@/*` maps to project root (configured in `tsconfig.json`).
+
+Supabase migrations are in `supabase/migrations/`. Apply via Supabase dashboard SQL editor or `supabase db push` if CLI is configured.
+
+To test cron endpoints locally:
+```bash
+curl -H "Authorization: Bearer <CRON_SECRET>" http://localhost:3000/api/cron/morning
+```
