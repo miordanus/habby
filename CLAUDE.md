@@ -149,13 +149,13 @@ No primary key uniqueness on `(goal_id, metric_key)` — upserts delete all item
 |---|---|---|---|---|---|
 | nicotine_count | <= | 20 | — | — | 10 |
 | caffeine_cups | <= | 2 | — | — | 10 |
-| water_ml | >= | 2000 | — | — | 10 |
-| protein_g | >= | 150 | — | — | 10 |
-| calories | range | 2700 | — | 0.10 | 10 |
-| alcohol_yes | == | — | false | — | 10 |
-| vitamins_adam | == | — | true | — | 10 |
-| magnesium | == | — | true | — | 10 |
-| l_theanine | == | — | true | — | 10 |
+| water_ml | >= | 2000 | — | — | 0 |
+| protein_g | >= | 150 | — | — | 0 |
+| calories | range | 2700 | — | 0.10 | 0 |
+| alcohol_yes | == | — | false | — | 0 |
+| vitamins_adam | == | — | true | — | 0 |
+| magnesium | == | — | true | — | 0 |
+| l_theanine | == | — | true | — | 0 |
 
 ### Table: `daily_goal_evaluations`
 ```sql

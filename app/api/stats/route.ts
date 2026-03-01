@@ -1,13 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getSupabase, getUserId } from "@/lib/supabaseServer"
 import { getLogicalDate } from "@/lib/logicalDate"
-
-function parseTgId(req: NextRequest): number | null {
-  const v = req.headers.get("x-telegram-user-id")
-  if (!v) return null
-  const n = Number(v)
-  return Number.isFinite(n) ? n : null
-}
+import { parseTgId } from "@/lib/parseRequest"
 
 function avg(vals: (number | null)[]): number | null {
   const v = vals.filter((x): x is number => x != null)
@@ -33,7 +27,7 @@ export async function GET(req: NextRequest) {
 
   const { data: rows } = await sb
     .from("daily_logs")
-    .select("date,nicotine_count,caffeine_cups,calories,protein_g,water_ml,training_type,wake_time")
+    .select("date,nicotine_count,caffeine_cups,calories,protein_g,water_ml,training_type")
     .eq("user_id", userId)
     .gte("date", lastFrom)
     .lte("date", thisTo)

@@ -30,7 +30,7 @@ export interface StreakResult {
  * Rules:
  *  - A day is "logged" if its date appears in loggedDates.
  *  - Within each ISO week, one missed day is forgiven (shield).
- *  - Two consecutive misses (or running out of shield) breaks the streak.
+ *  - A second miss in the same week breaks the streak.
  */
 export function computeStreak(loggedDates: string[], today: string): StreakResult {
   const logged = new Set(loggedDates)
@@ -41,17 +41,12 @@ export function computeStreak(loggedDates: string[], today: string): StreakResul
   // Track shield usage per ISO year+week key
   const shieldUsed = new Map<string, boolean>()
 
-  let cursor = today
-  let consecutiveMisses = 0
-
   for (let i = 0; i < 60; i++) {
     const date = subtractDay(today, i)
     const weekKey = `${isoYear(date)}-W${weekNumber(date)}`
 
     if (logged.has(date)) {
       streak++
-      consecutiveMisses = 0
-      cursor = date
       continue
     }
 
@@ -62,8 +57,6 @@ export function computeStreak(loggedDates: string[], today: string): StreakResul
       if (weekKey === `${isoYear(today)}-W${weekNumber(today)}`) {
         shieldActive = true
       }
-      consecutiveMisses = 0
-      cursor = date
       continue
     }
 

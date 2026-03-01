@@ -41,16 +41,7 @@ async function awardXp(
 
 /** Determine if a log qualifies as "full" check-in. */
 function isFull(log: LogRow): boolean {
-  const hasCoreNutrition =
-    log.nicotine_count !== undefined &&
-    log.caffeine_cups !== undefined &&
-    log.water_ml !== undefined &&
-    log.calories != null &&
-    log.protein_g != null
-
-  const hasSleep = !!(log.wake_time || log.sleep_time)
-
-  return hasCoreNutrition && hasSleep
+  return log.calories != null && log.protein_g != null && !!(log.wake_time || log.sleep_time)
 }
 
 /** Award checkin XP (quick/full/backfill) — idempotent. */
@@ -91,6 +82,14 @@ export async function awardBonusXP(
   return total
 }
 
+/** Return the Monday (YYYY-MM-DD) of the ISO week containing dateStr. */
+function isoWeekMonday(dateStr: string): string {
+  const d = new Date(dateStr + "T12:00:00Z")
+  const dow = (d.getUTCDay() + 6) % 7 // Mon=0 … Sun=6
+  d.setUTCDate(d.getUTCDate() - dow)
+  return d.toISOString().slice(0, 10)
+}
+
 /** Check & award weekly training bonus (once per ISO week). */
 export async function checkWeeklyTrainingBonus(
   sb: SB,
@@ -111,8 +110,12 @@ export async function checkWeeklyTrainingBonus(
 
   if (!sessions || sessions.length < 2) return 0
 
+  // Use the Monday of the ISO week as the event date so the triple
+  // (user_id, monday_date, weekly_training_YYYY-WW) is stable for all
+  // saves within the same week — prevents double-awarding.
   const week = isoWeek(todayDate)
-  return await awardXp(sb, userId, todayDate, `weekly_training_${week}`, 40, { week })
+  const weekMonday = isoWeekMonday(todayDate)
+  return await awardXp(sb, userId, weekMonday, `weekly_training_${week}`, 40, { week })
 }
 
 interface GoalItem {
