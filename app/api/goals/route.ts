@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from "next/server"
 import { getSupabase, getUserId } from "@/lib/supabaseServer"
 import { getLogicalDate, addDays } from "@/lib/logicalDate"
 import { ensureDefaultGoals } from "@/lib/defaultGoals"
+import { parseTgId } from "@/lib/parseRequest"
 
-function parseTgId(req: NextRequest): number | null {
-  const v = req.headers.get("x-telegram-user-id")
-  if (!v) return null
-  const n = Number(v)
-  return Number.isFinite(n) ? n : null
-}
+const ALLOWED_METRIC_KEYS = new Set([
+  "nicotine_count", "caffeine_cups", "water_ml", "protein_g",
+  "calories", "alcohol_yes", "vitamins_adam", "magnesium", "l_theanine",
+])
+const ALLOWED_OPERATORS = new Set(["<=", ">=", "==", "range"])
 
 export async function GET(req: NextRequest) {
   const tgId = parseTgId(req)
@@ -67,6 +67,18 @@ export async function POST(req: NextRequest) {
     )
   }
 
+  // Validate each item before touching the DB
+  const rawItems: unknown[] = Array.isArray(body.items) ? body.items : []
+  for (const item of rawItems) {
+    const i = item as Record<string, unknown>
+    if (!ALLOWED_METRIC_KEYS.has(i.metric_key as string)) {
+      return NextResponse.json({ error: `Unknown metric_key: ${i.metric_key}` }, { status: 400 })
+    }
+    if (!ALLOWED_OPERATORS.has(i.operator as string)) {
+      return NextResponse.json({ error: `Invalid operator: ${i.operator}` }, { status: 400 })
+    }
+  }
+
   const { data: goal, error } = await sb
     .from("goals")
     .upsert(
@@ -81,23 +93,26 @@ export async function POST(req: NextRequest) {
   // Delete old items for this goal version, then insert fresh
   await sb.from("goal_items").delete().eq("goal_id", goal.id)
 
-  const items = (body.items ?? []).map((item: {
-    metric_key: string
-    operator: string
-    target_number?: number | null
-    target_bool?: boolean | null
-    tolerance_number?: number | null
-    xp_reward?: number
-  }) => ({
-    goal_id: goal.id,
-    metric_key: item.metric_key,
-    operator: item.operator,
-    target_number: item.target_number ?? null,
-    target_bool: item.target_bool ?? null,
-    tolerance_number: item.tolerance_number ?? null,
-    xp_reward: item.xp_reward ?? 10,
-    is_active: true,
-  }))
+  const items = rawItems.map((item) => {
+    const i = item as {
+      metric_key: string
+      operator: string
+      target_number?: number | null
+      target_bool?: boolean | null
+      tolerance_number?: number | null
+      xp_reward?: number
+    }
+    return {
+      goal_id: goal.id,
+      metric_key: i.metric_key,
+      operator: i.operator,
+      target_number: i.target_number ?? null,
+      target_bool: i.target_bool ?? null,
+      tolerance_number: i.tolerance_number ?? null,
+      xp_reward: i.xp_reward ?? 10,
+      is_active: true,
+    }
+  })
 
   if (items.length > 0) await sb.from("goal_items").insert(items)
 

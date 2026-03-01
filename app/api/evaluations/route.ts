@@ -1,12 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getSupabase, getUserId } from "@/lib/supabaseServer"
-
-function parseTgId(req: NextRequest): number | null {
-  const v = req.headers.get("x-telegram-user-id")
-  if (!v) return null
-  const n = Number(v)
-  return Number.isFinite(n) ? n : null
-}
+import { parseTgId } from "@/lib/parseRequest"
 
 export async function GET(req: NextRequest) {
   const tgId = parseTgId(req)

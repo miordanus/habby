@@ -17,7 +17,6 @@ function offsetDate(ms: number): string {
 export function isoWeek(dateStr: string): string {
   const d = new Date(dateStr + "T12:00:00Z")
   const jan4 = new Date(Date.UTC(d.getUTCFullYear(), 0, 4))
-  const dayOfWeek = (d.getUTCDay() + 6) % 7
   const weekNum = Math.ceil(
     ((d.getTime() - jan4.getTime()) / 86400000 + (jan4.getUTCDay() + 6) % 7 + 1) / 7
   )
