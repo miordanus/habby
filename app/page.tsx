@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth, apiHeaders } from "@/hooks/useAuth"
 import NavBar from "@/components/NavBar"
@@ -48,8 +48,23 @@ export default function Home() {
   const [evals, setEvals] = useState<EvalRow[]>([])
   const [toast, setToast] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [autoSaveStatus, setAutoSaveStatus] = useState<null | "pending" | "saving" | "saved">(null)
+
+  const draftRef = useRef(draft)
+  const logRef = useRef(log)
+  const telegramUserIdRef = useRef(telegramUserId)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const isLoadingRef = useRef(false)
 
   useEffect(() => { setMounted(true) }, [])
+  useEffect(() => { draftRef.current = draft }, [draft])
+  useEffect(() => { logRef.current = log }, [log])
+  useEffect(() => { telegramUserIdRef.current = telegramUserId }, [telegramUserId])
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current)
+    }
+  }, [])
 
   const load = useCallback(async () => {
     if (!telegramUserId) return
@@ -65,6 +80,7 @@ export default function Home() {
     if (logRes.ok) {
       const data: DailyLog | null = await logRes.json()
       if (data) {
+        isLoadingRef.current = true
         setLog(data)
         setDraft({
           nicotine_count: data.nicotine_count,
@@ -73,6 +89,7 @@ export default function Home() {
           calories: data.calories ?? 0,
           protein_g: data.protein_g ?? 0,
         })
+        queueMicrotask(() => { isLoadingRef.current = false })
       }
     }
     if (xpRes.ok) setXp(await xpRes.json())
@@ -88,24 +105,50 @@ export default function Home() {
     setTimeout(() => setToast(null), 2500)
   }
 
-  async function handleQuickSave() {
-    if (!telegramUserId || saving) return
+  const performSave = useCallback(async () => {
+    const tgId = telegramUserIdRef.current
+    if (!tgId) return
+    setAutoSaveStatus("saving")
     setSaving(true)
     try {
       const today = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString().slice(0, 10)
       const res = await fetch("/api/logs", {
         method: "POST",
-        headers: apiHeaders(telegramUserId),
-        body: JSON.stringify({ ...log, ...draft, date: today }),
+        headers: apiHeaders(tgId),
+        body: JSON.stringify({ ...logRef.current, ...draftRef.current, date: today }),
       })
       if (res.ok) {
         const { xpEarned } = await res.json()
-        showToast(toastMessage(xpEarned))
+        if (xpEarned > 0) showToast(toastMessage(xpEarned))
+        setAutoSaveStatus("saved")
+        setTimeout(() => setAutoSaveStatus(null), 2000)
         load()
+      } else {
+        setAutoSaveStatus(null)
       }
+    } catch {
+      setAutoSaveStatus(null)
     } finally {
       setSaving(false)
     }
+  }, [load])
+
+  const scheduleSave = useCallback(() => {
+    if (isLoadingRef.current) return
+    if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current)
+    setAutoSaveStatus("pending")
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null
+      performSave()
+    }, 1500)
+  }, [performSave])
+
+  async function handleQuickSave() {
+    if (saveTimerRef.current !== null) {
+      clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = null
+    }
+    await performSave()
   }
 
   // ── Auth gates ──────────────────────────────────────────────────────────────
@@ -191,16 +234,16 @@ export default function Home() {
             label="🚬"
             value={draft.nicotine_count}
             increments={[1, 5]}
-            onAdd={(n) => setDraft((d) => ({ ...d, nicotine_count: d.nicotine_count + n }))}
-            onSub={() => setDraft((d) => ({ ...d, nicotine_count: Math.max(0, d.nicotine_count - 1) }))}
+            onAdd={(n) => { setDraft((d) => ({ ...d, nicotine_count: d.nicotine_count + n })); scheduleSave() }}
+            onSub={() => { setDraft((d) => ({ ...d, nicotine_count: Math.max(0, d.nicotine_count - 1) })); scheduleSave() }}
           />
           <div className="border-t border-[var(--border)]" />
           <Clicker
             label="☕"
             value={draft.caffeine_cups}
             increments={[1]}
-            onAdd={(n) => setDraft((d) => ({ ...d, caffeine_cups: d.caffeine_cups + n }))}
-            onSub={() => setDraft((d) => ({ ...d, caffeine_cups: Math.max(0, d.caffeine_cups - 1) }))}
+            onAdd={(n) => { setDraft((d) => ({ ...d, caffeine_cups: d.caffeine_cups + n })); scheduleSave() }}
+            onSub={() => { setDraft((d) => ({ ...d, caffeine_cups: Math.max(0, d.caffeine_cups - 1) })); scheduleSave() }}
           />
           <div className="border-t border-[var(--border)]" />
           <Clicker
@@ -208,8 +251,8 @@ export default function Home() {
             value={draft.water_ml}
             unit="ml"
             increments={[250, 500]}
-            onAdd={(n) => setDraft((d) => ({ ...d, water_ml: d.water_ml + n }))}
-            onSub={() => setDraft((d) => ({ ...d, water_ml: Math.max(0, d.water_ml - 250) }))}
+            onAdd={(n) => { setDraft((d) => ({ ...d, water_ml: d.water_ml + n })); scheduleSave() }}
+            onSub={() => { setDraft((d) => ({ ...d, water_ml: Math.max(0, d.water_ml - 250) })); scheduleSave() }}
           />
           <div className="border-t border-[var(--border)]" />
           <Clicker
@@ -217,8 +260,8 @@ export default function Home() {
             value={draft.calories}
             unit="kcal"
             increments={[200, 500]}
-            onAdd={(n) => setDraft((d) => ({ ...d, calories: d.calories + n }))}
-            onSub={() => setDraft((d) => ({ ...d, calories: Math.max(0, d.calories - 200) }))}
+            onAdd={(n) => { setDraft((d) => ({ ...d, calories: d.calories + n })); scheduleSave() }}
+            onSub={() => { setDraft((d) => ({ ...d, calories: Math.max(0, d.calories - 200) })); scheduleSave() }}
           />
           <div className="border-t border-[var(--border)]" />
           <Clicker
@@ -226,18 +269,25 @@ export default function Home() {
             value={draft.protein_g}
             unit="g"
             increments={[25, 50]}
-            onAdd={(n) => setDraft((d) => ({ ...d, protein_g: d.protein_g + n }))}
-            onSub={() => setDraft((d) => ({ ...d, protein_g: Math.max(0, d.protein_g - 25) }))}
+            onAdd={(n) => { setDraft((d) => ({ ...d, protein_g: d.protein_g + n })); scheduleSave() }}
+            onSub={() => { setDraft((d) => ({ ...d, protein_g: Math.max(0, d.protein_g - 25) })); scheduleSave() }}
           />
         </div>
 
         {/* Quick save */}
+        {autoSaveStatus !== null && (
+          <p className="text-xs font-mono text-[var(--text-muted)] text-center mb-1">
+            {autoSaveStatus === "pending" && "Unsaved changes…"}
+            {autoSaveStatus === "saving" && "Saving…"}
+            {autoSaveStatus === "saved" && "Saved ✓"}
+          </p>
+        )}
         <button
           onClick={handleQuickSave}
           disabled={saving}
           className="w-full py-4 bg-[#00FF85] text-black font-bold text-sm uppercase tracking-wider rounded-xl mb-3 disabled:opacity-50 active:scale-95 transition-transform"
         >
-          {saving ? "Saving…" : "Save"}
+          Save
         </button>
 
         {/* Nav shortcuts */}
