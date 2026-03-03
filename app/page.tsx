@@ -48,7 +48,7 @@ export default function Home() {
   const [evals, setEvals] = useState<EvalRow[]>([])
   const [toast, setToast] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const [autoSaveStatus, setAutoSaveStatus] = useState<null | "pending" | "saving" | "saved">(null)
+  const [autoSaveStatus, setAutoSaveStatus] = useState<null | "saving" | "saved">(null)
 
   const draftRef = useRef(draft)
   const logRef = useRef(log)
@@ -62,7 +62,20 @@ export default function Home() {
   useEffect(() => { telegramUserIdRef.current = telegramUserId }, [telegramUserId])
   useEffect(() => {
     return () => {
-      if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current)
+      if (saveTimerRef.current !== null) {
+        clearTimeout(saveTimerRef.current)
+        saveTimerRef.current = null
+        const tgId = telegramUserIdRef.current
+        if (tgId) {
+          const today = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString().slice(0, 10)
+          fetch("/api/logs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-telegram-user-id": String(tgId) },
+            body: JSON.stringify({ ...logRef.current, ...draftRef.current, date: today }),
+            keepalive: true,
+          })
+        }
+      }
     }
   }, [])
 
@@ -136,20 +149,11 @@ export default function Home() {
   const scheduleSave = useCallback(() => {
     if (isLoadingRef.current) return
     if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current)
-    setAutoSaveStatus("pending")
     saveTimerRef.current = setTimeout(() => {
       saveTimerRef.current = null
       performSave()
-    }, 1500)
+    }, 3000)
   }, [performSave])
-
-  async function handleQuickSave() {
-    if (saveTimerRef.current !== null) {
-      clearTimeout(saveTimerRef.current)
-      saveTimerRef.current = null
-    }
-    await performSave()
-  }
 
   // ── Auth gates ──────────────────────────────────────────────────────────────
 
@@ -274,21 +278,13 @@ export default function Home() {
           />
         </div>
 
-        {/* Quick save */}
+        {/* Auto-save status */}
         {autoSaveStatus !== null && (
-          <p className="text-xs font-mono text-[var(--text-muted)] text-center mb-1">
-            {autoSaveStatus === "pending" && "Unsaved changes…"}
+          <p className="text-xs font-mono text-[var(--text-muted)] text-center mb-3">
             {autoSaveStatus === "saving" && "Saving…"}
             {autoSaveStatus === "saved" && "Saved ✓"}
           </p>
         )}
-        <button
-          onClick={handleQuickSave}
-          disabled={saving}
-          className="w-full py-4 bg-[#00FF85] text-black font-bold text-sm uppercase tracking-wider rounded-xl mb-3 disabled:opacity-50 active:scale-95 transition-transform"
-        >
-          Save
-        </button>
 
         {/* Nav shortcuts */}
         <div className="grid grid-cols-2 gap-2">
