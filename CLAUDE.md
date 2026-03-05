@@ -33,7 +33,7 @@ No middleware.ts. No Supabase Auth (JWT). Auth is Telegram initData + service-ro
 │   ├── layout.tsx               # Root layout: Geist font, viewport cover, NavBar
 │   ├── page.tsx                 # HOME: quest-first + NicotineButton + RatingBars
 │   ├── checkin/page.tsx         # Full check-in form (supports ?date= backfill)
-│   ├── history/page.tsx         # Last 7 logical days list
+│   ├── history/page.tsx         # Last 7 logical days list (legacy; nav tab is Timeline)
 │   ├── goals/page.tsx           # Current goals + next-version editor
 │   ├── stats/page.tsx           # This week vs last week comparison
 │   ├── timeline/page.tsx        # Daily event stream + mini rating charts
@@ -46,6 +46,7 @@ No middleware.ts. No Supabase Auth (JWT). Auth is Telegram initData + service-ro
 │       ├── goals/route.ts              # GET/POST: versioned goal management
 │       ├── evaluations/route.ts        # GET: daily_goal_evaluations for a date
 │       ├── events/route.ts             # GET/POST: append-only event stream
+│       ├── events/[id]/route.ts        # PATCH: edit event ts_effective (7-day window)
 │       ├── preferences/route.ts        # GET/PATCH: user preferences (nicotine type)
 │       ├── quests/route.ts             # GET: active quests with progress
 │       ├── quests/[id]/route.ts        # PATCH: update quest status
@@ -101,9 +102,12 @@ No middleware.ts. No Supabase Auth (JWT). Auth is Telegram initData + service-ro
 Events (append-only) → Quest progress evaluation → Daily score → AI intervention → Telegram message
 
 ### Phase System
-- `morning`: 05:00–11:59 (logical time, after 05:00 UTC offset)
-- `day`:     12:00–17:59
-- `evening`: 18:00–04:59
+Phases use **raw UTC hours** — NOT the 05:00 logical-date offset. This is intentional so phases match waking hours for Moscow (UTC+3).
+- `morning`: 05:00–11:59 UTC (≈ 08:00–14:59 Moscow)
+- `day`:     12:00–17:59 UTC (≈ 15:00–20:59 Moscow)
+- `evening`: 18:00–04:59 UTC (≈ 21:00–07:59 Moscow)
+
+Phase is computed from `new Date().getUTCHours()` in `lib/phaseUtils.ts`. It is distinct from logical date computation.
 
 ### Event Types
 `nicotine` | `coffee_cup` | `water_ml` | `vitamins_adam` | `magnesium` | `l_theanine` | `workout` | `alcohol_yes` | `self_rating_energy` | `self_rating_focus` | `self_rating_stress`
@@ -541,10 +545,71 @@ checkWeeklyTrainingBonus(sb, userId, today)
 - "Last week" = 7 days before that
 - Averages are `Math.round()`, null if no data for the period
 
-### `GET /api/cron/morning` and `GET /api/cron/evening`
+### `GET /api/events`
+- `?date=YYYY-MM-DD` → array of events for that logical date
+- Events sorted chronologically by `ts_effective`
+
+### `POST /api/events`
+- Body: `{ type, value?, value_bool?, value_text?, ts_effective?, metadata? }`
+- `ts_effective` defaults to server now if omitted
+- `logical_date` auto-computed by DB from `ts_effective` with 5h offset
+- Triggers non-blocking conditional intervention checks for `nicotine` and `water_ml` events
+- Returns: created event row
+
+### `PATCH /api/events/[id]`
+- Body: `{ ts_effective: string }` (ISO timestamp)
+- Validates: `ts_effective` must be within 7 days of today; event must belong to requesting user
+- Updates `ts_effective`; `logical_date` recomputed by DB trigger
+- Returns: updated event row
+
+### `GET /api/quests`
+- `?date=YYYY-MM-DD` (default: logical today)
+- Returns: `{ quests: Quest[], phase: Phase, summary: DailySummary | null }`
+- Each quest includes dynamically computed `progress` (current vs target)
+
+### `PATCH /api/quests/[id]`
+- Body: `{ status: "completed" | "cancelled" }`
+- Inserts into `quest_history`, awards XP via `xp_events` (idempotent: `event_type = quest_<id>`)
+- Returns: updated quest
+
+### `POST /api/quests/generate`
+- Generates daily (3) + weekly (3) + monthly (3) quests for today
+- Idempotent — skips if quests already exist for the period
+- Called by morning cron and optionally by users
+- Returns: `{ ok: true, date: string }`
+
+### `GET /api/summaries`
+- `?date=YYYY-MM-DD` (default: logical today)
+- Returns cached summary from `daily_summaries`, or computes on-demand
+- Computation calls `lib/scoreEngine.ts` with events, quests, and health samples
+
+### `GET /api/preferences`
+- Returns: user preferences row (upserts defaults: `nicotine_default_type = "cig"`)
+
+### `PATCH /api/preferences`
+- Body: `{ nicotine_default_type?: string }` (cig/vape/pouch/other)
+- Returns: updated preferences row
+
+### `POST /api/health-samples`
+- Auth: `x-health-secret` header must match `HEALTH_WEBHOOK_SECRET` env var
+- Body: array of Apple Health samples (sleep, HRV, steps, etc.)
+- Upserts into `health_samples` table
+- Returns: `{ ok: true, count: number }`
+
+### `GET /api/cron/morning`
 - Auth: `x-vercel-cron` header present OR `Authorization: Bearer <CRON_SECRET>`
-- Sends Telegram `sendMessage` with inline `web_app` button to `TELEGRAM_CHAT_ID`
-- Returns: `{ ok: true, period: "morning" | "evening" }`
+- Generates daily quests + sends AI morning message to `TELEGRAM_CHAT_ID`
+- Returns: `{ ok: true, period: "morning" }`
+
+### `GET /api/cron/day`
+- Auth: same as morning
+- Runs conditional intervention checks (nicotine spike, low hydration, no activity, improvement, missed quests)
+- Returns: `{ ok: true, period: "day" }`
+
+### `GET /api/cron/evening`
+- Auth: same as morning
+- Computes and caches daily score + sends AI verdict to `TELEGRAM_CHAT_ID`
+- Returns: `{ ok: true, period: "evening" }`
 
 ---
 
@@ -555,13 +620,15 @@ File: `vercel.json`
 {
   "crons": [
     { "path": "/api/cron/morning", "schedule": "30 5 * * *" },
+    { "path": "/api/cron/day",     "schedule": "0 12 * * *" },
     { "path": "/api/cron/evening", "schedule": "30 20 * * *" }
   ]
 }
 ```
 
-- `30 5 * * *` = 05:30 UTC ≈ 08:30 Moscow (UTC+3)
-- `30 20 * * *` = 20:30 UTC ≈ 23:30 Moscow (UTC+3)
+- `30 5 * * *`  = 05:30 UTC ≈ 08:30 Moscow (UTC+3) — quests + morning AI message
+- `0 12 * * *`  = 12:00 UTC ≈ 15:00 Moscow (UTC+3) — conditional intervention checks
+- `30 20 * * *` = 20:30 UTC ≈ 23:30 Moscow (UTC+3) — daily score + AI verdict
 
 Cron only fires on Vercel production deployments.
 
@@ -606,7 +673,7 @@ Props: `streak`, `shieldActive`
 Renders "🔥 N day streak" with optional "🛡" shield emoji.
 
 ### `NavBar`
-Fixed bottom navigation: Home / Log / History / Goals / Stats.
+Fixed bottom navigation: **Home / Log / Timeline / Goals / Stats** (5 tabs).
 Uses `env(safe-area-inset-bottom)` for iOS Telegram safe area.
 
 ---
@@ -629,6 +696,99 @@ viewport: { viewportFit: "cover" }  // Next.js metadata export
 ```
 
 NavBar bottom padding: `pb-[env(safe-area-inset-bottom)]`
+
+---
+
+## Scoring System
+
+File: `lib/scoreEngine.ts`
+
+```typescript
+computeDayScore(events: Event[], quests: Quest[], health: HealthSample[]): DayScore
+```
+
+Four weighted components (each 0–100), combined into a single `score`:
+
+| Component | Weight | Key factors |
+|---|---|---|
+| **Recovery** | 30% | Sleep duration (7–9h ideal), HRV from health samples |
+| **Focus** | 25% | Coffee intake (1–2 cups optimal), L-theanine combo, self-rated focus |
+| **Stress** | 25% | Nicotine count (0 best → 15+ bad), self-rated stress |
+| **Discipline** | 20% | Quest completion rate (completed quests / total active) |
+
+Each component returns a `score` (0–100) and an array of `reasons` (human-readable Russian strings). For example: `"Сон 7.5ч — в норме"`.
+
+Final score: `recovery×0.30 + focus×0.25 + stress×0.25 + discipline×0.20`.
+
+Result cached in `daily_summaries` table. Re-computed on-demand if not yet cached.
+
+---
+
+## Intervention Engine
+
+File: `lib/interventionEngine.ts`
+
+Trigger checks run during `GET /api/cron/day` and non-blocking after certain event writes.
+
+### Trigger conditions
+
+| Check | Condition | When |
+|---|---|---|
+| `checkNicotineSpike()` | Rate > 2× daily goal rate for elapsed time AND count > 5 | After nicotine event |
+| `checkHydrationLow()` | < 30–45% of 2000ml goal by current phase | After water_ml event |
+| `checkNoEvents()` | No events in last 3 hours | Day cron only |
+| `checkImprovement()` | ≥40% nicotine reduction OR ≥40% water increase vs yesterday | Day cron only |
+| `checkMissedQuests()` | ≥2 daily quests still active during evening phase | Evening cron |
+
+Each trigger calls `sendIntervention()` which:
+1. Calls `lib/aiProvider.ts` with the `intervention_conditional` prompt template
+2. Sends a Telegram message with an inline web_app button
+3. Inserts a row into `interventions` table (audit trail, prevents double-firing)
+
+### `interventions` table
+Tracks which interventions were already sent (`trigger_key`, `date`) to avoid repeated messages.
+
+---
+
+## Quest System Details
+
+File: `lib/questEngine.ts`
+
+### Quest template examples
+
+| template_key | type | target | XP |
+|---|---|---|---|
+| `daily_water_2000` | daily | 2000 ml water | 50 |
+| `daily_nicotine_limit_20` | daily | ≤20 nicotine | 60 |
+| `daily_no_alcohol` | daily | 0 alcohol events | 40 |
+| `weekly_training_3x` | weekly | ≥3 workouts | 150 |
+| `weekly_water_streak_5` | weekly | 5 days hitting water goal | 100 |
+| `monthly_streak_20` | monthly | 20-day log streak | 300 |
+
+### Quest lifecycle
+- Status: `active` → `completed` | `expired` | `cancelled` | `replaced`
+- Uniqueness: `(user_id, quest_type, template_key, valid_from)` — prevents duplicate generation
+- Progress: computed dynamically from events (not stored), recalculated on every `GET /api/quests`
+- Completion: user taps checkbox → `PATCH /api/quests/[id]` → history entry + XP award
+- Expiry: quests not completed by `valid_until` remain `active` (no automatic expiry job)
+
+### AI quest text
+Generated by calling `lib/aiProvider.ts` with the quest template data. AI returns a short motivational title + description. Fallback is the template's `default_title` / `default_description` if AI fails.
+
+---
+
+## Dark Mode
+
+File: `app/globals.css`, `app/layout.tsx`
+
+Theme is controlled by a `.dark` CSS class on the `<html>` element, **not** `prefers-color-scheme`. This allows user override.
+
+CSS variable sets:
+- Default (light): `--bg-page: #F5F5F5`, `--bg-card: #FFFFFF`, `--text: #111111`
+- `.dark` (dark): `--bg-page: #1A1A1A`, `--bg-card: #222222`, `--text: #FFFFFF`
+- `--accent: #00FF85` (neon green) — same in both themes
+
+Theme persistence: stored in `localStorage["theme"]`. Restored before first paint via an inline `<script>` in `layout.tsx` to prevent flash.
 
 ---
 
