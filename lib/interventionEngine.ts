@@ -76,6 +76,14 @@ export type TriggerType =
   | "no_events"
   | "improvement"
   | "missed_quests"
+  // Hourly rule-engine triggers (deterministic, no LLM)
+  | "nicotine_rate"
+  | "water_critical"
+  | "no_events_90min"
+  | "energy_untracked"
+  | "coffee_theanine"
+  | "vitamins_reminder"
+  | "good_progress"
 
 /** Generate AI message and send Telegram intervention. Records in DB. */
 export async function sendIntervention(
@@ -115,7 +123,7 @@ export async function sendIntervention(
 }
 
 function buildButtons(ctaTypes: string[], appUrl: string) {
-  const buttons: { text: string; url?: string; web_app?: { url: string } }[] = []
+  const buttons: { text: string; url?: string; web_app?: { url: string }; callback_data?: string }[] = []
   for (const cta of ctaTypes) {
     switch (cta) {
       case "open_app":
@@ -128,7 +136,13 @@ function buildButtons(ctaTypes: string[], appUrl: string) {
         buttons.push({ text: "🚬 Залогировать никотин", web_app: { url: `${appUrl}?action=nicotine` } })
         break
       default:
-        buttons.push({ text: "🎮 Открыть", web_app: { url: appUrl } })
+        // Support raw callback_data strings passed through directly
+        if (cta.includes(":")) {
+          const label = cta.startsWith("log_water") ? "💧 Вода" : cta.startsWith("log_energy") ? "⚡ Энергия" : "✅ Ок"
+          buttons.push({ text: label, callback_data: cta })
+        } else {
+          buttons.push({ text: "🎮 Открыть", web_app: { url: appUrl } })
+        }
     }
   }
   return buttons.length > 0 ? buttons : [{ text: "🎮 Neuro-Run", web_app: { url: appUrl } }]
