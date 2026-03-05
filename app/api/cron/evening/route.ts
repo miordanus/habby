@@ -65,17 +65,20 @@ export async function GET(req: NextRequest) {
       const waterTotal = events.filter((e) => e.type === "water_ml").reduce((s, e) => s + (e.value ?? 0), 0)
       const coffeeCount = events.filter((e) => e.type === "coffee_cup").length
 
-      // Compute streak from daily_logs
+      // Compute streak from events (covers both home-page and checkin-page activity)
       const thirtyDaysAgo = new Date(new Date(today + "T12:00:00Z").getTime() - 29 * 86400000)
         .toISOString()
         .slice(0, 10)
-      const { data: logRows } = await sb
-        .from("daily_logs")
-        .select("date")
+      const { data: eventRows } = await sb
+        .from("events")
+        .select("logical_date")
         .eq("user_id", userId)
-        .gte("date", thirtyDaysAgo)
-        .lte("date", today)
-      const { streak } = computeStreak((logRows ?? []).map((r) => r.date as string), today)
+        .gte("logical_date", thirtyDaysAgo)
+        .lte("logical_date", today)
+      const loggedDates = Array.from(
+        new Set((eventRows ?? []).map((r: { logical_date: string }) => r.logical_date))
+      ) as string[]
+      const { streak } = computeStreak(loggedDates, today)
 
       // Generate AI verdict
       const ai = await generateAI(sb, "daily_verdict", {

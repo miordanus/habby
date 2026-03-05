@@ -2,25 +2,10 @@
 // All functions take a service-role Supabase client.
 import { SupabaseClient } from "@supabase/supabase-js"
 import { isoWeek } from "./logicalDate"
+import type { DayAggregate } from "./eventAggregator"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SB = SupabaseClient<any>
-
-interface LogRow {
-  nicotine_count: number
-  caffeine_cups: number
-  calories: number | null
-  protein_g: number | null
-  water_ml: number
-  wake_time: string | null
-  sleep_time: string | null
-  phone_free_min: number | null
-  training_type: string
-  vitamins_adam: boolean
-  magnesium: boolean
-  l_theanine: boolean
-  alcohol_yes: boolean
-}
 
 /** Award XP event idempotently. Returns xp awarded (0 if duplicate). */
 async function awardXp(
@@ -39,9 +24,9 @@ async function awardXp(
   return xp
 }
 
-/** Determine if a log qualifies as "full" check-in. */
-function isFull(log: LogRow): boolean {
-  return log.calories != null && log.protein_g != null && !!(log.wake_time || log.sleep_time)
+/** Determine if an aggregate qualifies as "full" check-in. */
+function isFull(aggregate: DayAggregate): boolean {
+  return aggregate.calories != null && aggregate.protein_g != null && !!(aggregate.wake_time || aggregate.sleep_time)
 }
 
 /** Award checkin XP (quick/full/backfill) — idempotent. */
@@ -50,7 +35,7 @@ export async function awardCheckinXP(
   userId: string,
   date: string,
   todayDate: string,
-  log: LogRow
+  aggregate: DayAggregate
 ): Promise<number> {
   let total = 0
 
@@ -59,7 +44,7 @@ export async function awardCheckinXP(
     total += await awardXp(sb, userId, date, "checkin_backfill", 15)
   }
 
-  if (isFull(log)) {
+  if (isFull(aggregate)) {
     total += await awardXp(sb, userId, date, "checkin_full", 35)
   } else {
     total += await awardXp(sb, userId, date, "checkin_quick", 20)
@@ -73,10 +58,10 @@ export async function awardBonusXP(
   sb: SB,
   userId: string,
   date: string,
-  log: LogRow
+  aggregate: DayAggregate
 ): Promise<number> {
   let total = 0
-  if ((log.phone_free_min ?? 0) >= 30) {
+  if ((aggregate.phone_free_min ?? 0) >= 30) {
     total += await awardXp(sb, userId, date, "bonus_phone_free_30", 10)
   }
   return total
@@ -96,17 +81,18 @@ export async function checkWeeklyTrainingBonus(
   userId: string,
   todayDate: string
 ): Promise<number> {
-  // Count sessions in last 7 logical days
+  // Count sessions in last 7 logical days from the events table
   const sevenDaysAgo = new Date(new Date(todayDate + "T12:00:00Z").getTime() - 6 * 86400000)
     .toISOString()
     .slice(0, 10)
 
   const { data: sessions } = await sb
-    .from("daily_logs")
-    .select("date")
+    .from("events")
+    .select("id")
     .eq("user_id", userId)
-    .gte("date", sevenDaysAgo)
-    .neq("training_type", "none")
+    .in("type", ["workout", "training_session"])
+    .gte("logical_date", sevenDaysAgo)
+    .lte("logical_date", todayDate)
 
   if (!sessions || sessions.length < 2) return 0
 
@@ -134,7 +120,7 @@ export async function evaluateAndPersistGoals(
   sb: SB,
   userId: string,
   date: string,
-  log: LogRow
+  aggregate: DayAggregate
 ): Promise<number> {
   // Find applicable goal version (latest effective_from <= date)
   const { data: goalRow } = await sb
@@ -159,7 +145,7 @@ export async function evaluateAndPersistGoals(
   let xpTotal = 0
 
   for (const item of items as GoalItem[]) {
-    const result = evaluateMetric(item, log)
+    const result = evaluateMetric(item, aggregate)
     if (!result) continue
 
     const { met, actualNumber, actualBool, deltaNumber, xpAwarded } = result
@@ -197,7 +183,7 @@ export async function evaluateAndPersistGoals(
 
 function evaluateMetric(
   item: GoalItem,
-  log: LogRow
+  aggregate: DayAggregate
 ): {
   met: boolean
   actualNumber: number | null
@@ -207,13 +193,13 @@ function evaluateMetric(
 } | null {
   const key = item.metric_key
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const logAny = log as any
+  const agg = aggregate as any
 
   // l_theanine is N/A if caffeine_cups == 0
-  if (key === "l_theanine" && log.caffeine_cups === 0) {
+  if (key === "l_theanine" && aggregate.caffeine_cups === 0) {
     return {
       met: true,
-      actualBool: log.l_theanine,
+      actualBool: aggregate.l_theanine,
       actualNumber: null,
       deltaNumber: null,
       xpAwarded: 0,
@@ -221,13 +207,13 @@ function evaluateMetric(
   }
 
   if (item.operator === "==" && item.target_bool !== null) {
-    const actual = logAny[key] as boolean
+    const actual = agg[key] as boolean
     const met = actual === item.target_bool
     return { met, actualBool: actual, actualNumber: null, deltaNumber: null, xpAwarded: met ? item.xp_reward : 0 }
   }
 
   if (item.operator === "range" && item.target_number !== null) {
-    const actual = logAny[key] as number | null
+    const actual = agg[key] as number | null
     if (actual == null) return { met: false, actualNumber: null, actualBool: null, deltaNumber: null, xpAwarded: 0 }
     const tol = item.tolerance_number ?? 0.10
     const delta = actual - item.target_number
@@ -236,7 +222,7 @@ function evaluateMetric(
   }
 
   if (item.target_number !== null) {
-    const actual = logAny[key] as number | null
+    const actual = agg[key] as number | null
     if (actual == null) return { met: false, actualNumber: null, actualBool: null, deltaNumber: null, xpAwarded: 0 }
     let met = false
     if (item.operator === "<=") met = actual <= item.target_number
@@ -246,4 +232,27 @@ function evaluateMetric(
   }
 
   return null
+}
+
+/**
+ * Shared XP pipeline — called from both POST /api/logs and POST /api/events.
+ * Errors are swallowed (non-fatal). Returns total XP earned.
+ */
+export async function runXpPipeline(
+  sb: SB,
+  userId: string,
+  date: string,
+  todayDate: string,
+  aggregate: DayAggregate
+): Promise<number> {
+  let xpEarned = 0
+  try {
+    xpEarned += await awardCheckinXP(sb, userId, date, todayDate, aggregate)
+    xpEarned += await awardBonusXP(sb, userId, date, aggregate)
+    xpEarned += await evaluateAndPersistGoals(sb, userId, date, aggregate)
+    xpEarned += await checkWeeklyTrainingBonus(sb, userId, todayDate)
+  } catch (err) {
+    console.error("[xpEngine] runXpPipeline error:", err)
+  }
+  return xpEarned
 }

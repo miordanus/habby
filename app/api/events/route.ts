@@ -3,6 +3,8 @@ import { getSupabase, getUserId } from "@/lib/supabaseServer"
 import { parseTgId } from "@/lib/parseRequest"
 import { getLogicalDate, dateDiff } from "@/lib/logicalDate"
 import type { EventType } from "@/types/database"
+import { aggregateDay } from "@/lib/eventAggregator"
+import { runXpPipeline } from "@/lib/xpEngine"
 
 export const runtime = "nodejs"
 
@@ -11,6 +13,10 @@ const VALID_TYPES: EventType[] = [
   "vitamins_adam", "magnesium", "l_theanine",
   "workout", "alcohol_yes",
   "self_rating_energy", "self_rating_focus", "self_rating_stress",
+  // aggregate types (bridge from daily_logs)
+  "calories_kcal", "protein_g", "training_session",
+  "phone_free_min", "weight_kg", "resting_hr_manual",
+  "wake_time", "sleep_time",
 ]
 
 const BOOL_TYPES: EventType[] = ["vitamins_adam", "magnesium", "l_theanine", "alcohol_yes"]
@@ -113,7 +119,31 @@ export async function POST(req: NextRequest) {
     runConditionalChecksAsync(sb, userId, logicalDateOfEvent, today).catch(() => {})
   }
 
+  // Run XP pipeline non-blocking — closes the gap where home-page events earned no XP
+  runXpPipelineAsync(sb, userId, logicalDateOfEvent, today).catch(() => {})
+
   return NextResponse.json(data, { status: 201 })
+}
+
+/** Run XP pipeline in background after an event write (fire and forget) */
+async function runXpPipelineAsync(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sb: import("@supabase/supabase-js").SupabaseClient<any>,
+  userId: string,
+  logicalDate: string,
+  today: string
+) {
+  try {
+    const { data: dayEvents } = await sb
+      .from("events")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("logical_date", logicalDate)
+    const aggregate = aggregateDay(dayEvents ?? [])
+    await runXpPipeline(sb, userId, logicalDate, today, aggregate)
+  } catch (err) {
+    console.error("[events] XP pipeline failed:", err)
+  }
 }
 
 /** Run conditional intervention checks in background (fire and forget) */

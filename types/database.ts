@@ -89,6 +89,7 @@ export interface XpSummary {
 // ── Neuro-Run types ───────────────────────────────────────────
 
 export type EventType =
+  // original stream types
   | 'nicotine'
   | 'coffee_cup'
   | 'water_ml'
@@ -100,6 +101,17 @@ export type EventType =
   | 'self_rating_energy'
   | 'self_rating_focus'
   | 'self_rating_stress'
+  // aggregate types (latest-value-wins — bridge from daily_logs)
+  | 'calories_kcal'
+  | 'protein_g'
+  | 'training_session'
+  | 'phone_free_min'
+  | 'weight_kg'
+  | 'resting_hr_manual'
+  | 'wake_time'
+  | 'sleep_time'
+
+export type { DayAggregate } from '@/lib/eventAggregator'
 
 export type NicotineType = 'cig' | 'vape' | 'pouch' | 'other'
 
