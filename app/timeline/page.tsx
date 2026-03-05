@@ -17,6 +17,14 @@ const EVENT_EMOJI: Record<EventType, string> = {
   self_rating_energy:   "⚡",
   self_rating_focus:    "🎯",
   self_rating_stress:   "😰",
+  calories_kcal:        "🍽️",
+  protein_g:            "🥩",
+  training_session:     "🏃",
+  phone_free_min:       "📵",
+  weight_kg:            "⚖️",
+  resting_hr_manual:    "❤️",
+  wake_time:            "🌅",
+  sleep_time:           "🌙",
 }
 
 const EVENT_LABELS: Record<EventType, string> = {
@@ -31,6 +39,14 @@ const EVENT_LABELS: Record<EventType, string> = {
   self_rating_energy:   "Энергия",
   self_rating_focus:    "Фокус",
   self_rating_stress:   "Стресс",
+  calories_kcal:        "Калории",
+  protein_g:            "Белок",
+  training_session:     "Тренировка",
+  phone_free_min:       "Без телефона",
+  weight_kg:            "Вес",
+  resting_hr_manual:    "Пульс покоя",
+  wake_time:            "Подъём",
+  sleep_time:           "Отбой",
 }
 
 const RATING_TYPES: EventType[] = ["self_rating_energy", "self_rating_focus", "self_rating_stress"]
