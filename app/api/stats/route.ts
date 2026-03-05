@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getSupabase, getUserId } from "@/lib/supabaseServer"
 import { getLogicalDate } from "@/lib/logicalDate"
+import { aggregateDay, type DayAggregate } from "@/lib/eventAggregator"
 import { parseTgId } from "@/lib/parseRequest"
 
 function avg(vals: (number | null)[]): number | null {
@@ -24,17 +25,68 @@ export async function GET(req: NextRequest) {
 
   const [thisFrom, thisTo] = dateRange(today, 0, 7)
   const [lastFrom, lastTo] = dateRange(today, -7, 7)
+  const rangeFrom = lastFrom
 
-  const { data: rows } = await sb
+  // Fetch events for the full 14-day window
+  const { data: rangeEvents, error: evErr } = await sb
+    .from("events")
+    .select("*")
+    .eq("user_id", userId)
+    .gte("logical_date", rangeFrom)
+    .lte("logical_date", thisTo)
+
+  if (evErr) return NextResponse.json({ error: evErr.message }, { status: 500 })
+
+  // Group events by logical_date and aggregate each day
+  const byDate = new Map<string, DayAggregate>()
+  const eventsByDate = new Map<string, typeof rangeEvents>()
+  for (const ev of rangeEvents ?? []) {
+    const d = ev.logical_date as string
+    if (!eventsByDate.has(d)) eventsByDate.set(d, [])
+    eventsByDate.get(d)!.push(ev)
+  }
+  for (const [d, evs] of eventsByDate) {
+    byDate.set(d, aggregateDay(evs))
+  }
+
+  // Fallback: fetch daily_logs rows for dates not covered by events
+  const eventDates = new Set(byDate.keys())
+  const { data: legacyRows } = await sb
     .from("daily_logs")
     .select("date,nicotine_count,caffeine_cups,calories,protein_g,water_ml,training_type")
     .eq("user_id", userId)
-    .gte("date", lastFrom)
+    .gte("date", rangeFrom)
     .lte("date", thisTo)
-    .order("date")
+
+  for (const row of legacyRows ?? []) {
+    const d = row.date as string
+    if (!eventDates.has(d)) {
+      // Convert legacy row shape to DayAggregate (all fields present)
+      byDate.set(d, {
+        nicotine_count: row.nicotine_count ?? 0,
+        caffeine_cups: row.caffeine_cups ?? 0,
+        water_ml: row.water_ml ?? 0,
+        calories: row.calories ?? null,
+        protein_g: row.protein_g ?? null,
+        training_type: (row.training_type ?? "none") as DayAggregate["training_type"],
+        wake_time: null,
+        sleep_time: null,
+        phone_free_min: null,
+        resting_hr: null,
+        weight_kg: null,
+        vitamins_adam: false,
+        magnesium: false,
+        l_theanine: false,
+        alcohol_yes: false,
+      })
+    }
+  }
 
   function summarise(from: string, to: string) {
-    const subset = (rows ?? []).filter((r) => r.date >= from && r.date <= to)
+    const subset: DayAggregate[] = []
+    for (const [d, agg] of byDate) {
+      if (d >= from && d <= to) subset.push(agg)
+    }
     return {
       days_logged: subset.length,
       avg_nicotine: avg(subset.map((r) => r.nicotine_count)),

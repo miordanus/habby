@@ -1,8 +1,26 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getSupabase, getUserId } from "@/lib/supabaseServer"
 import { getLogicalDate } from "@/lib/logicalDate"
-import { awardCheckinXP, awardBonusXP, evaluateAndPersistGoals, checkWeeklyTrainingBonus } from "@/lib/xpEngine"
+import { runXpPipeline } from "@/lib/xpEngine"
+import { aggregateDay, type DayAggregate } from "@/lib/eventAggregator"
 import { parseTgId } from "@/lib/parseRequest"
+import type { DailyLog } from "@/types/database"
+
+/** Reconstruct a DailyLog-shaped response from a DayAggregate + metadata. */
+function aggregateToLog(
+  userId: string,
+  date: string,
+  aggregate: DayAggregate
+): DailyLog {
+  return {
+    id: "",
+    user_id: userId,
+    date,
+    created_at: "",
+    updated_at: "",
+    ...aggregate,
+  }
+}
 
 export async function GET(req: NextRequest) {
   const tgId = parseTgId(req)
@@ -17,6 +35,19 @@ export async function GET(req: NextRequest) {
   const to = searchParams.get("to")
 
   if (date) {
+    // Try events first
+    const { data: dayEvents, error: evErr } = await sb
+      .from("events")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("logical_date", date)
+    if (evErr) return NextResponse.json({ error: evErr.message }, { status: 500 })
+
+    if (dayEvents && dayEvents.length > 0) {
+      return NextResponse.json(aggregateToLog(userId, date, aggregateDay(dayEvents)))
+    }
+
+    // Fallback: historical data in daily_logs
     const { data, error } = await sb
       .from("daily_logs")
       .select("*")
@@ -28,15 +59,48 @@ export async function GET(req: NextRequest) {
   }
 
   if (from && to) {
-    const { data, error } = await sb
+    // Build a date list and aggregate per date from events; fall back to daily_logs for missing dates
+    const { data: rangeEvents, error: evErr } = await sb
+      .from("events")
+      .select("*")
+      .eq("user_id", userId)
+      .gte("logical_date", from)
+      .lte("logical_date", to)
+    if (evErr) return NextResponse.json({ error: evErr.message }, { status: 500 })
+
+    // Group events by date
+    const byDate = new Map<string, typeof rangeEvents>()
+    for (const ev of rangeEvents ?? []) {
+      const d = ev.logical_date as string
+      if (!byDate.has(d)) byDate.set(d, [])
+      byDate.get(d)!.push(ev)
+    }
+
+    const eventDates = new Set(byDate.keys())
+
+    // For dates that have events, reconstruct from events
+    const eventLogs: DailyLog[] = [...byDate.entries()]
+      .sort((a, b) => (a[0] > b[0] ? -1 : 1)) // descending
+      .map(([d, evs]) => aggregateToLog(userId, d, aggregateDay(evs)))
+
+    // Fallback: fetch daily_logs rows for dates not covered by events
+    const { data: legacyRows } = await sb
       .from("daily_logs")
       .select("*")
       .eq("user_id", userId)
       .gte("date", from)
       .lte("date", to)
       .order("date", { ascending: false })
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-    return NextResponse.json(data ?? [])
+
+    const legacyFiltered = (legacyRows ?? []).filter(
+      (r: { date: string }) => !eventDates.has(r.date)
+    ) as DailyLog[]
+
+    // Merge and sort descending
+    const merged = [...eventLogs, ...legacyFiltered].sort((a, b) =>
+      (a.date > b.date ? -1 : 1)
+    )
+    return NextResponse.json(merged)
   }
 
   return NextResponse.json({ error: "Provide date or from+to" }, { status: 400 })
@@ -79,6 +143,7 @@ export async function POST(req: NextRequest) {
     alcohol_yes: body.alcohol_yes ?? false,
   }
 
+  // Write to daily_logs (backward compat)
   const { data: log, error } = await sb
     .from("daily_logs")
     .upsert(payload, { onConflict: "user_id,date" })
@@ -87,16 +152,69 @@ export async function POST(req: NextRequest) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
-  // XP engine (fire-and-forget errors — don't fail the request)
-  let xpEarned = 0
-  try {
-    xpEarned += await awardCheckinXP(sb, userId, date, today, payload)
-    xpEarned += await awardBonusXP(sb, userId, date, payload)
-    xpEarned += await evaluateAndPersistGoals(sb, userId, date, payload)
-    xpEarned += await checkWeeklyTrainingBonus(sb, userId, today)
-  } catch (err) {
+  // Dual-write aggregate-only fields as events (fire and forget)
+  writeDailyLogEvents(sb, userId, date, body).catch((err) =>
+    console.error("[/api/logs POST] event dual-write error:", err)
+  )
+
+  // XP engine via events aggregation (fire and forget)
+  runXpFromEvents(sb, userId, date, today).catch((err) =>
     console.error("[/api/logs POST] XP engine error:", err)
+  )
+
+  return NextResponse.json({ log, xpEarned: 0 })
+}
+
+/**
+ * Write events for the aggregate-only fields that have no home-page equivalent.
+ * Uses noon UTC of the given date as ts_effective (daily anchor timestamp).
+ * These are "latest-value-wins" fields so it's fine to append a new event on
+ * each checkin form submission — aggregateDay will pick the newest.
+ */
+async function writeDailyLogEvents(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sb: import("@supabase/supabase-js").SupabaseClient<any>,
+  userId: string,
+  date: string,
+  body: Record<string, unknown>
+) {
+  const tsEffective = date + "T12:00:00Z"
+  const toInsert: object[] = []
+
+  const push = (type: string, value?: number | null, value_text?: string | null) => {
+    if (value != null || value_text != null) {
+      toInsert.push({ user_id: userId, ts_original: new Date().toISOString(), ts_effective: tsEffective, type, value: value ?? null, value_text: value_text ?? null })
+    }
   }
 
-  return NextResponse.json({ log, xpEarned })
+  push("calories_kcal", body.calories as number | undefined)
+  push("protein_g", body.protein_g as number | undefined)
+  if (body.training_type && body.training_type !== "none") {
+    push("training_session", null, body.training_type as string)
+  }
+  push("phone_free_min", body.phone_free_min as number | undefined)
+  push("weight_kg", body.weight_kg as number | undefined)
+  push("resting_hr_manual", body.resting_hr as number | undefined)
+  if (body.wake_time) push("wake_time", null, body.wake_time as string)
+  if (body.sleep_time) push("sleep_time", null, body.sleep_time as string)
+
+  if (toInsert.length === 0) return
+  await sb.from("events").insert(toInsert)
+}
+
+/** Fetch all events for a date, aggregate, and run XP pipeline. */
+async function runXpFromEvents(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sb: import("@supabase/supabase-js").SupabaseClient<any>,
+  userId: string,
+  date: string,
+  today: string
+) {
+  const { data: dayEvents } = await sb
+    .from("events")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("logical_date", date)
+  const aggregate = aggregateDay(dayEvents ?? [])
+  await runXpPipeline(sb, userId, date, today, aggregate)
 }
