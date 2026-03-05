@@ -18,12 +18,13 @@ export function verifyCronAuth(req: NextRequest): NextResponse | null {
   return null // auth passed
 }
 
-// ── Telegram send helper ───────────────────────────────────────
+// ── Telegram button types ──────────────────────────────────────
 
-interface TelegramButton {
+export interface TelegramButton {
   text: string
   url?: string
   web_app?: { url: string }
+  callback_data?: string  // for inline keyboard callback queries
 }
 
 /**
@@ -68,6 +69,60 @@ export async function sendTelegramMessage(
   } catch (err) {
     console.error("[cronReminder] sendTelegramMessage failed:", err)
     return null
+  }
+}
+
+// ── Callback query helpers ─────────────────────────────────────
+
+/**
+ * Dismiss the loading spinner after a user taps an inline button.
+ * Must be called within 10 seconds of receiving the callback_query update.
+ */
+export async function answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN
+  if (!botToken) return
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+    })
+  } catch (err) {
+    console.error("[cronReminder] answerCallbackQuery failed:", err)
+  }
+}
+
+/**
+ * Edit the text of an existing bot message (e.g. show confirmation after tap).
+ */
+export async function editMessageText(
+  chatId: string,
+  messageId: number,
+  text: string,
+  buttons: TelegramButton[] = []
+): Promise<void> {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN
+  if (!botToken) return
+
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: "Markdown",
+  }
+
+  if (buttons.length > 0) {
+    body.reply_markup = { inline_keyboard: [buttons] }
+  }
+
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+  } catch (err) {
+    console.error("[cronReminder] editMessageText failed:", err)
   }
 }
 
