@@ -1,14 +1,18 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth, apiHeaders } from "@/hooks/useAuth"
 import NavBar from "@/components/NavBar"
 import XPBar from "@/components/XPBar"
 import StreakBadge from "@/components/StreakBadge"
-import GoalChips from "@/components/GoalChips"
+import PhaseBar from "@/components/PhaseBar"
+import QuestCard from "@/components/QuestCard"
+import NicotineButton from "@/components/NicotineButton"
+import RatingBar from "@/components/RatingBar"
 import Clicker from "@/components/Clicker"
-import { DailyLog } from "@/types/database"
+import { getCurrentPhase } from "@/lib/phaseUtils"
+import type { Quest, QuestProgress, Phase } from "@/types/database"
 
 const BOT_USERNAME = "habby_bot"
 
@@ -18,16 +22,26 @@ interface XpData {
   streak: number; shieldActive: boolean
 }
 
-interface EvalRow {
-  metric_key: string; met: boolean
-  actual_number: number | null; actual_bool: boolean | null
-  target_number: number | null; target_bool: boolean | null
+interface QuestWithProgress extends Quest {
+  progress: QuestProgress
+}
+
+interface QuestsResponse {
+  quests: QuestWithProgress[]
+  phase: Phase
+  summary: { completed: number; total: number }
+}
+
+interface EventCounts {
+  nicotine: number
+  coffee: number
+  water: number
 }
 
 function toastMessage(xp: number): string {
-  if (xp >= 45) return `Saved! +${xp} XP 🔥`
-  if (xp > 0)  return `Saved! +${xp} XP`
-  return "Saved!"
+  if (xp >= 45) return `+${xp} XP 🔥`
+  if (xp > 0)  return `+${xp} XP`
+  return "Залогировано!"
 }
 
 export default function Home() {
@@ -35,123 +49,118 @@ export default function Home() {
   const { state, telegramUserId } = useAuth()
   const [mounted, setMounted] = useState(false)
 
-  const [log, setLog] = useState<Partial<DailyLog>>({})
-  const [draft, setDraft] = useState({
-    nicotine_count: 0,
-    caffeine_cups: 0,
-    water_ml: 0,
-    calories: 0,
-    protein_g: 0,
+  const [xp, setXp] = useState<XpData | null>(null)
+  const [questsData, setQuestsData] = useState<QuestsResponse | null>(null)
+  const [counts, setCounts] = useState<EventCounts>({ nicotine: 0, coffee: 0, water: 0 })
+  const [phase, setPhase] = useState<Phase>(getCurrentPhase())
+  const [toast, setToast] = useState<string | null>(null)
+  const [ratingValues, setRatingValues] = useState<{ energy: number | null; focus: number | null; stress: number | null }>({
+    energy: null, focus: null, stress: null,
   })
 
-  const [xp, setXp] = useState<XpData | null>(null)
-  const [evals, setEvals] = useState<EvalRow[]>([])
-  const [toast, setToast] = useState<string | null>(null)
-  const [saving, setSaving] = useState(false)
-  const [autoSaveStatus, setAutoSaveStatus] = useState<null | "pending" | "saving" | "saved">(null)
-
-  const draftRef = useRef(draft)
-  const logRef = useRef(log)
-  const telegramUserIdRef = useRef(telegramUserId)
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const isLoadingRef = useRef(false)
-
-  useEffect(() => { setMounted(true) }, [])
-  useEffect(() => { draftRef.current = draft }, [draft])
-  useEffect(() => { logRef.current = log }, [log])
-  useEffect(() => { telegramUserIdRef.current = telegramUserId }, [telegramUserId])
   useEffect(() => {
-    return () => {
-      if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current)
-    }
+    setMounted(true)
+    // Refresh phase every minute
+    const interval = setInterval(() => setPhase(getCurrentPhase()), 60_000)
+    return () => clearInterval(interval)
   }, [])
+
+  const showToast = (msg: string) => {
+    setToast(msg)
+    setTimeout(() => setToast(null), 2500)
+  }
 
   const load = useCallback(async () => {
     if (!telegramUserId) return
     const hdr = { "x-telegram-user-id": String(telegramUserId) }
     const today = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString().slice(0, 10)
 
-    const [logRes, xpRes, evalRes] = await Promise.all([
-      fetch(`/api/logs?date=${today}`, { headers: hdr }),
+    const [xpRes, questsRes, eventsRes] = await Promise.all([
       fetch("/api/xp", { headers: hdr }),
-      fetch(`/api/evaluations?date=${today}`, { headers: hdr }),
+      fetch("/api/quests", { headers: hdr }),
+      fetch(`/api/events?date=${today}`, { headers: hdr }),
     ])
 
-    if (logRes.ok) {
-      const data: DailyLog | null = await logRes.json()
-      if (data) {
-        isLoadingRef.current = true
-        setLog(data)
-        setDraft({
-          nicotine_count: data.nicotine_count,
-          caffeine_cups: data.caffeine_cups,
-          water_ml: data.water_ml,
-          calories: data.calories ?? 0,
-          protein_g: data.protein_g ?? 0,
-        })
-        queueMicrotask(() => { isLoadingRef.current = false })
-      }
-    }
     if (xpRes.ok) setXp(await xpRes.json())
-    if (evalRes.ok) setEvals(await evalRes.json())
+    if (questsRes.ok) setQuestsData(await questsRes.json())
+    if (eventsRes.ok) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const events: any[] = await eventsRes.json()
+      setCounts({
+        nicotine: events.filter((e) => e.type === "nicotine").length,
+        coffee:   events.filter((e) => e.type === "coffee_cup").length,
+        water:    events.filter((e) => e.type === "water_ml").reduce((s: number, e: { value: number }) => s + (e.value ?? 0), 0),
+      })
+    }
   }, [telegramUserId])
 
   useEffect(() => {
     if (state === "authed") load()
   }, [state, load])
 
-  function showToast(msg: string) {
-    setToast(msg)
-    setTimeout(() => setToast(null), 2500)
-  }
-
-  const performSave = useCallback(async () => {
-    const tgId = telegramUserIdRef.current
-    if (!tgId) return
-    setAutoSaveStatus("saving")
-    setSaving(true)
-    try {
-      const today = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString().slice(0, 10)
-      const res = await fetch("/api/logs", {
+  const logEvent = useCallback(
+    async (type: string, params: Record<string, unknown> = {}) => {
+      if (!telegramUserId) return 0
+      const res = await fetch("/api/events", {
         method: "POST",
-        headers: apiHeaders(tgId),
-        body: JSON.stringify({ ...logRef.current, ...draftRef.current, date: today }),
+        headers: apiHeaders(telegramUserId),
+        body: JSON.stringify({ type, ...params }),
       })
-      if (res.ok) {
-        const { xpEarned } = await res.json()
-        if (xpEarned > 0) showToast(toastMessage(xpEarned))
-        setAutoSaveStatus("saved")
-        setTimeout(() => setAutoSaveStatus(null), 2000)
-        load()
-      } else {
-        setAutoSaveStatus(null)
-      }
-    } catch {
-      setAutoSaveStatus(null)
-    } finally {
-      setSaving(false)
-    }
+      return res.ok ? 1 : 0
+    },
+    [telegramUserId]
+  )
+
+  const handleNicotineLogged = useCallback(() => {
+    setCounts((c) => ({ ...c, nicotine: c.nicotine + 1 }))
+    showToast("🚬 залогировано")
+    load()
   }, [load])
 
-  const scheduleSave = useCallback(() => {
-    if (isLoadingRef.current) return
-    if (saveTimerRef.current !== null) clearTimeout(saveTimerRef.current)
-    setAutoSaveStatus("pending")
-    saveTimerRef.current = setTimeout(() => {
-      saveTimerRef.current = null
-      performSave()
-    }, 1500)
-  }, [performSave])
+  const handleCoffeeAdd = useCallback(async () => {
+    await logEvent("coffee_cup", { value: 1 })
+    setCounts((c) => ({ ...c, coffee: c.coffee + 1 }))
+    showToast("☕ залогировано")
+    load()
+  }, [logEvent, load])
 
-  async function handleQuickSave() {
-    if (saveTimerRef.current !== null) {
-      clearTimeout(saveTimerRef.current)
-      saveTimerRef.current = null
-    }
-    await performSave()
-  }
+  const handleWaterAdd = useCallback(
+    async (ml: number) => {
+      await logEvent("water_ml", { value: ml })
+      setCounts((c) => ({ ...c, water: c.water + ml }))
+      showToast(`💧 +${ml}мл`)
+      load()
+    },
+    [logEvent, load]
+  )
 
-  // ── Auth gates ──────────────────────────────────────────────────────────────
+  const handleRating = useCallback(
+    async (type: "energy" | "focus" | "stress", value: number) => {
+      setRatingValues((v) => ({ ...v, [type]: value }))
+      await logEvent(`self_rating_${type}`, { value })
+      showToast(`Оценка сохранена`)
+      load()
+    },
+    [logEvent, load]
+  )
+
+  const handleQuestComplete = useCallback(
+    async (questId: string) => {
+      if (!telegramUserId) return
+      const res = await fetch(`/api/quests/${questId}`, {
+        method: "PATCH",
+        headers: apiHeaders(telegramUserId),
+        body: JSON.stringify({ status: "completed", reason: "User marked complete" }),
+      })
+      if (res.ok) {
+        showToast("Квест выполнен! 🎉")
+        load()
+      }
+    },
+    [telegramUserId, load]
+  )
+
+  // ── Auth gates ────────────────────────────────────────────────
 
   if (!mounted || state === "checking") {
     return (
@@ -187,10 +196,13 @@ export default function Home() {
     )
   }
 
-  // ── Main app ────────────────────────────────────────────────────────────────
+  // ── Main app ──────────────────────────────────────────────────
 
   const today = new Date(Date.now() - 5 * 60 * 60 * 1000)
-  const dateLabel = today.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })
+  const dateLabel = today.toLocaleDateString("ru-RU", { weekday: "short", month: "short", day: "numeric" })
+
+  const dailyQuests = questsData?.quests.filter((q) => q.quest_type === "daily") ?? []
+  const weeklyQuests = questsData?.quests.filter((q) => q.quest_type === "weekly") ?? []
 
   return (
     <div
@@ -199,12 +211,12 @@ export default function Home() {
     >
       {/* Header */}
       <header
-        className="px-4 pb-4 max-w-xl mx-auto"
+        className="px-4 pb-3 max-w-xl mx-auto"
         style={{ paddingTop: "max(2.5rem, env(safe-area-inset-top, 2.5rem))" }}
       >
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center justify-between mb-2">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">habby</h1>
+            <h1 className="text-2xl font-bold tracking-tight">Neuro-Run</h1>
             <p className="text-xs font-mono text-[var(--text-muted)] uppercase tracking-widest">{dateLabel}</p>
           </div>
           {xp && <StreakBadge streak={xp.streak} shieldActive={xp.shieldActive} />}
@@ -218,91 +230,113 @@ export default function Home() {
             xpForNextLevel={xp.xpForNextLevel}
           />
         )}
+        <div className="mt-2">
+          <PhaseBar phase={phase} />
+        </div>
       </header>
 
-      {/* Goal chips */}
-      {evals.length > 0 && (
-        <div className="px-4 mb-3 max-w-xl mx-auto">
-          <GoalChips evaluations={evals} />
-        </div>
-      )}
+      <main className="px-4 max-w-xl mx-auto space-y-4">
 
-      {/* Clicker grid */}
-      <main className="px-4 max-w-xl mx-auto">
-        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl px-4 py-1 mb-3">
-          <Clicker
-            label="🚬"
-            value={draft.nicotine_count}
-            increments={[1, 5]}
-            onAdd={(n) => { setDraft((d) => ({ ...d, nicotine_count: d.nicotine_count + n })); scheduleSave() }}
-            onSub={() => { setDraft((d) => ({ ...d, nicotine_count: Math.max(0, d.nicotine_count - 1) })); scheduleSave() }}
-          />
-          <div className="border-t border-[var(--border)]" />
-          <Clicker
-            label="☕"
-            value={draft.caffeine_cups}
-            increments={[1]}
-            onAdd={(n) => { setDraft((d) => ({ ...d, caffeine_cups: d.caffeine_cups + n })); scheduleSave() }}
-            onSub={() => { setDraft((d) => ({ ...d, caffeine_cups: Math.max(0, d.caffeine_cups - 1) })); scheduleSave() }}
-          />
-          <div className="border-t border-[var(--border)]" />
-          <Clicker
-            label="💧"
-            value={draft.water_ml}
-            unit="ml"
-            increments={[250, 500]}
-            onAdd={(n) => { setDraft((d) => ({ ...d, water_ml: d.water_ml + n })); scheduleSave() }}
-            onSub={() => { setDraft((d) => ({ ...d, water_ml: Math.max(0, d.water_ml - 250) })); scheduleSave() }}
-          />
-          <div className="border-t border-[var(--border)]" />
-          <Clicker
-            label="🍽"
-            value={draft.calories}
-            unit="kcal"
-            increments={[200, 500]}
-            onAdd={(n) => { setDraft((d) => ({ ...d, calories: d.calories + n })); scheduleSave() }}
-            onSub={() => { setDraft((d) => ({ ...d, calories: Math.max(0, d.calories - 200) })); scheduleSave() }}
-          />
-          <div className="border-t border-[var(--border)]" />
-          <Clicker
-            label="🥩"
-            value={draft.protein_g}
-            unit="g"
-            increments={[25, 50]}
-            onAdd={(n) => { setDraft((d) => ({ ...d, protein_g: d.protein_g + n })); scheduleSave() }}
-            onSub={() => { setDraft((d) => ({ ...d, protein_g: Math.max(0, d.protein_g - 25) })); scheduleSave() }}
-          />
-        </div>
+        {/* Daily quests */}
+        <section>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-xs font-mono text-[var(--text-muted)] uppercase tracking-widest">
+              Квесты дня
+            </h2>
+            {questsData && (
+              <span className="text-xs font-mono text-[var(--text-muted)]">
+                {questsData.summary.completed}/{questsData.summary.total}
+              </span>
+            )}
+          </div>
 
-        {/* Quick save */}
-        {autoSaveStatus !== null && (
-          <p className="text-xs font-mono text-[var(--text-muted)] text-center mb-1">
-            {autoSaveStatus === "pending" && "Unsaved changes…"}
-            {autoSaveStatus === "saving" && "Saving…"}
-            {autoSaveStatus === "saved" && "Saved ✓"}
-          </p>
+          {dailyQuests.length === 0 ? (
+            <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl px-4 py-6 text-center">
+              <p className="text-sm font-mono text-[var(--text-muted)]">Квесты ещё не назначены</p>
+              <p className="text-xs font-mono text-[var(--text-muted)] mt-1 opacity-60">Они появятся утром</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {dailyQuests.map((q) => (
+                <QuestCard
+                  key={q.id}
+                  quest={q}
+                  progress={q.progress}
+                  onComplete={handleQuestComplete}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* Weekly quests (collapsed section) */}
+        {weeklyQuests.length > 0 && (
+          <section>
+            <h2 className="text-xs font-mono text-[var(--text-muted)] uppercase tracking-widest mb-2">
+              Квесты недели
+            </h2>
+            <div className="space-y-2">
+              {weeklyQuests.map((q) => (
+                <QuestCard key={q.id} quest={q} progress={q.progress} />
+              ))}
+            </div>
+          </section>
         )}
-        <button
-          onClick={handleQuickSave}
-          disabled={saving}
-          className="w-full py-4 bg-[#00FF85] text-black font-bold text-sm uppercase tracking-wider rounded-xl mb-3 disabled:opacity-50 active:scale-95 transition-transform"
-        >
-          Save
-        </button>
+
+        {/* Quick log */}
+        <section>
+          <h2 className="text-xs font-mono text-[var(--text-muted)] uppercase tracking-widest mb-2">
+            Быстрый лог
+          </h2>
+
+          {/* Nicotine — primary action */}
+          <div className="mb-3">
+            <NicotineButton
+              telegramUserId={telegramUserId}
+              count={counts.nicotine}
+              onLogged={handleNicotineLogged}
+            />
+          </div>
+
+          {/* Coffee + Water */}
+          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl px-4 py-1 mb-3">
+            <Clicker
+              label="☕"
+              value={counts.coffee}
+              increments={[1]}
+              onAdd={handleCoffeeAdd}
+            />
+            <div className="border-t border-[var(--border)]" />
+            <Clicker
+              label="💧"
+              value={counts.water}
+              unit="мл"
+              increments={[250, 500]}
+              onAdd={(n) => handleWaterAdd(n)}
+            />
+          </div>
+
+          {/* State ratings */}
+          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl px-4 py-4 space-y-4">
+            <RatingBar type="energy" value={ratingValues.energy} onChange={(v) => handleRating("energy", v)} />
+            <RatingBar type="focus"  value={ratingValues.focus}  onChange={(v) => handleRating("focus", v)} />
+            <RatingBar type="stress" value={ratingValues.stress} onChange={(v) => handleRating("stress", v)} />
+          </div>
+        </section>
 
         {/* Nav shortcuts */}
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-2 pb-2">
           <button
             onClick={() => router.push("/checkin")}
             className="py-3 border border-[var(--border)] rounded-xl text-sm font-mono text-[var(--text-muted)] hover:border-[#444] transition-colors"
           >
-            ✏️ Full Check-in
+            ✏️ Полный лог
           </button>
           <button
-            onClick={() => router.push("/history")}
+            onClick={() => router.push("/timeline")}
             className="py-3 border border-[var(--border)] rounded-xl text-sm font-mono text-[var(--text-muted)] hover:border-[#444] transition-colors"
           >
-            📅 History
+            📊 Таймлайн
           </button>
         </div>
       </main>

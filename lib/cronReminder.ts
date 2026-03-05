@@ -1,7 +1,9 @@
-// SERVER ONLY — shared Telegram reminder sender used by both cron routes.
+// SERVER ONLY — shared Telegram messaging + cron auth helpers.
 import { NextRequest, NextResponse } from "next/server"
 
-export async function sendReminder(req: NextRequest, period: "morning" | "evening") {
+// ── Auth helper ────────────────────────────────────────────────
+
+export function verifyCronAuth(req: NextRequest): NextResponse | null {
   const secret = process.env.CRON_SECRET
   const cronHeader = req.headers.get("x-vercel-cron")
   const authHeader = req.headers.get("authorization")
@@ -10,39 +12,79 @@ export async function sendReminder(req: NextRequest, period: "morning" | "evenin
   if (!secret && !cronHeader) {
     return NextResponse.json({ error: "Cron not configured" }, { status: 500 })
   }
-
   if (!cronHeader && authHeader !== `Bearer ${secret}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
+  return null // auth passed
+}
 
+// ── Telegram send helper ───────────────────────────────────────
+
+interface TelegramButton {
+  text: string
+  url?: string
+  web_app?: { url: string }
+}
+
+/**
+ * Send a Telegram message to the configured chat.
+ * Returns the Telegram message ID on success, or null on error.
+ */
+export async function sendTelegramMessage(
+  text: string,
+  buttons: TelegramButton[] = []
+): Promise<number | null> {
   const botToken = process.env.TELEGRAM_BOT_TOKEN
   const chatId = process.env.TELEGRAM_CHAT_ID
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://t.me/your_bot"
 
   if (!botToken || !chatId) {
-    return NextResponse.json({ error: "Bot not configured" }, { status: 500 })
+    console.error("[cronReminder] Bot not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing)")
+    return null
   }
+
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    text,
+    parse_mode: "Markdown",
+  }
+
+  if (buttons.length > 0) {
+    body.reply_markup = { inline_keyboard: [buttons] }
+  }
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data = (await res.json()) as any
+    if (!res.ok) {
+      console.error("[cronReminder] Telegram error:", data.description)
+      return null
+    }
+    return data.result?.message_id ?? null
+  } catch (err) {
+    console.error("[cronReminder] sendTelegramMessage failed:", err)
+    return null
+  }
+}
+
+// ── Legacy reminder helper (used by cron routes) ───────────────
+
+export async function sendReminder(req: NextRequest, period: "morning" | "evening") {
+  const authError = verifyCronAuth(req)
+  if (authError) return authError
+
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://t.me/your_bot"
 
   const text =
     period === "morning"
-      ? "☀️ Good morning! Log your check-in to keep the streak alive."
-      : "🌙 Evening check-in time — how did today go?"
+      ? "🌅 *Neuro-Run: утро*\nНовый день, новые квесты. Открой и посмотри свой план."
+      : "🌙 *Neuro-Run: вечер*\nКак прошёл день? Проверь результаты и оцени стрик."
 
-  const body = {
-    chat_id: chatId,
-    text,
-    reply_markup: {
-      inline_keyboard: [[{ text: "Open habby", web_app: { url: appUrl } }]],
-    },
-  }
-
-  const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  })
-
-  const data = await res.json()
-  if (!res.ok) return NextResponse.json({ error: data.description }, { status: 500 })
+  const buttons: TelegramButton[] = [{ text: "🎮 Neuro-Run", web_app: { url: appUrl } }]
+  await sendTelegramMessage(text, buttons)
   return NextResponse.json({ ok: true, period })
 }

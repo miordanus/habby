@@ -1,7 +1,9 @@
-# habby — Neurochemistry Performance Tracker
+# Neuro-Run — Behavioral Roguelike Performance System
 ## Architecture Reference for AI Assistants
 
 This document describes the **actual implemented state** of the codebase. It supersedes any prior specification documents. Do not assume intended vs. actual — read this file and then the source.
+
+**Product name:** Neuro-Run (formerly Habby). A behavioral roguelike game system: life events → event stream → quests + score → AI coach interventions.
 
 ---
 
@@ -12,6 +14,7 @@ This document describes the **actual implemented state** of the codebase. It sup
 | Framework | Next.js App Router | 16.1.6 |
 | React | React | 19.2.3 |
 | Database | Supabase (PostgreSQL) | @supabase/supabase-js ^2.98.0 |
+| AI SDK | @anthropic-ai/sdk | ^0.78.0 |
 | Styling | Tailwind CSS | 4.x |
 | Language | TypeScript | 5.9.3 |
 | Font | Geist Sans / Geist Mono | 1.7.0 |
@@ -28,28 +31,41 @@ No middleware.ts. No Supabase Auth (JWT). Auth is Telegram initData + service-ro
 ├── app/
 │   ├── globals.css              # Tailwind 4 + CSS vars (dark/light, safe-area)
 │   ├── layout.tsx               # Root layout: Geist font, viewport cover, NavBar
-│   ├── page.tsx                 # Home: clickers + XPBar + GoalChips + StreakBadge
+│   ├── page.tsx                 # HOME: quest-first + NicotineButton + RatingBars
 │   ├── checkin/page.tsx         # Full check-in form (supports ?date= backfill)
 │   ├── history/page.tsx         # Last 7 logical days list
 │   ├── goals/page.tsx           # Current goals + next-version editor
 │   ├── stats/page.tsx           # This week vs last week comparison
+│   ├── timeline/page.tsx        # Daily event stream + mini rating charts
 │   └── api/
-│       ├── auth/telegram/route.ts   # POST: HMAC-SHA256 Telegram initData verify
-│       ├── me/route.ts              # GET: upsert user, return internal UUID
-│       ├── logs/route.ts            # GET/POST: daily log upsert + XP engine
-│       ├── xp/route.ts             # GET: XP totals, level, streak
-│       ├── stats/route.ts          # GET: week aggregates
-│       ├── goals/route.ts          # GET/POST: versioned goal management
-│       ├── evaluations/route.ts    # GET: daily_goal_evaluations for a date
+│       ├── auth/telegram/route.ts       # POST: HMAC-SHA256 Telegram initData verify
+│       ├── me/route.ts                  # GET: upsert user, return internal UUID
+│       ├── logs/route.ts                # GET/POST: daily log upsert + XP engine (legacy)
+│       ├── xp/route.ts                 # GET: XP totals, level, streak
+│       ├── stats/route.ts              # GET: week aggregates
+│       ├── goals/route.ts              # GET/POST: versioned goal management
+│       ├── evaluations/route.ts        # GET: daily_goal_evaluations for a date
+│       ├── events/route.ts             # GET/POST: append-only event stream
+│       ├── preferences/route.ts        # GET/PATCH: user preferences (nicotine type)
+│       ├── quests/route.ts             # GET: active quests with progress
+│       ├── quests/[id]/route.ts        # PATCH: update quest status
+│       ├── quests/generate/route.ts    # POST: generate daily/weekly quests (cron)
+│       ├── summaries/route.ts          # GET: daily score summary (compute on-demand)
+│       ├── health-samples/route.ts     # POST: Apple Health bridge webhook
 │       └── cron/
-│           ├── morning/route.ts    # GET: Telegram reminder (05:30 UTC)
-│           └── evening/route.ts    # GET: Telegram reminder (20:30 UTC)
+│           ├── morning/route.ts        # GET: gen quests + AI message (05:30 UTC)
+│           ├── day/route.ts            # GET: conditional checks (12:00 UTC)
+│           └── evening/route.ts        # GET: score + AI verdict (20:30 UTC)
 ├── components/
 │   ├── Clicker.tsx              # Increment/decrement widget with emoji label
 │   ├── XPBar.tsx               # Level + XP progress bar
 │   ├── GoalChips.tsx           # Inline chips showing goal evaluation status
 │   ├── StreakBadge.tsx         # Streak count + shield indicator
-│   └── NavBar.tsx              # Fixed bottom nav (5 tabs, iOS safe-area)
+│   ├── NavBar.tsx              # Fixed bottom nav (5 tabs, iOS safe-area)
+│   ├── PhaseBar.tsx            # Current phase (morning/day/evening) indicator
+│   ├── QuestCard.tsx           # Quest display with progress bar + completion
+│   ├── NicotineButton.tsx      # Tap to log, hold 400ms → type picker (cig/vape/pouch/other)
+│   └── RatingBar.tsx           # 5-emoji self-rating bar (energy/focus/stress)
 ├── hooks/
 │   └── useAuth.ts              # Telegram auth hook + apiHeaders helper
 ├── lib/
@@ -58,12 +74,20 @@ No middleware.ts. No Supabase Auth (JWT). Auth is Telegram initData + service-ro
 │   ├── streak.ts               # Streak computation (ISO-week shield)
 │   ├── xpEngine.ts             # XP award functions (all idempotent)
 │   ├── defaultGoals.ts         # Creates default goal version if none exists
-│   └── telegram.ts             # Telegram Mini App env detection + initData helpers
+│   ├── telegram.ts             # Telegram Mini App env detection + initData helpers
+│   ├── cronReminder.ts         # verifyCronAuth() + sendTelegramMessage() helpers
+│   ├── parseRequest.ts         # parseTgId() header extraction
+│   ├── phaseUtils.ts           # getCurrentPhase(), getPhaseLabel(), Phase type
+│   ├── aiProvider.ts           # AI abstraction (Anthropic/OpenAI switchable via AI_PROVIDER env)
+│   ├── scoreEngine.ts          # computeDayScore(events, quests, health) → 0-100 components
+│   ├── questEngine.ts          # Quest templates, generation, progress, lifecycle
+│   └── interventionEngine.ts  # Conditional trigger checks + sendIntervention()
 ├── types/
-│   └── database.ts             # TypeScript interfaces for all DB rows
+│   └── database.ts             # TypeScript interfaces for all DB rows (incl. Neuro-Run types)
 ├── supabase/
 │   └── migrations/
-│       └── 001_neurochemistry_tracker.sql  # Complete schema with RLS
+│       ├── 001_neurochemistry_tracker.sql  # Original schema (users, daily_logs, goals, xp_events)
+│       └── 002_neuro_run_upgrade.sql       # Neuro-Run schema (events, quests, summaries, ai_prompts, etc.)
 ├── docs/
 │   └── SETUP.md                # Deployment guide
 └── vercel.json                 # Cron schedules
@@ -71,7 +95,76 @@ No middleware.ts. No Supabase Auth (JWT). Auth is Telegram initData + service-ro
 
 ---
 
+## Neuro-Run: New Event-Based Architecture
+
+### Core Loop
+Events (append-only) → Quest progress evaluation → Daily score → AI intervention → Telegram message
+
+### Phase System
+- `morning`: 05:00–11:59 (logical time, after 05:00 UTC offset)
+- `day`:     12:00–17:59
+- `evening`: 18:00–04:59
+
+### Event Types
+`nicotine` | `coffee_cup` | `water_ml` | `vitamins_adam` | `magnesium` | `l_theanine` | `workout` | `alcohol_yes` | `self_rating_energy` | `self_rating_focus` | `self_rating_stress`
+
+### Quest System
+- 3 daily + 3 weekly + 3 monthly quests
+- Generated by `lib/questEngine.ts` (rules-based template selection + AI text)
+- Morning cron generates daily quests
+- Quest status: active → completed | expired | cancelled | replaced
+- XP awarded on completion: upserted to `xp_events` with `event_type = quest_<id>`
+
+### AI Provider
+- `lib/aiProvider.ts`: switchable via `AI_PROVIDER` env ('anthropic' | 'openai')
+- Prompts stored in `ai_prompts` table (versioned) with fallback to hardcoded
+- Output: `{ diagnosis, action, vibe_line?, cta_types[] }` — always structured JSON
+
+### Nicotine Button UX
+- `components/NicotineButton.tsx`: tap = log; hold 400ms → type picker (cig/vape/pouch/other)
+- Type persisted to localStorage + `user_preferences` table
+
+### Backward Compat
+`daily_logs` table and all legacy API routes (`/api/logs`, `/api/goals`, `/api/evaluations`) are kept intact. New home screen uses `/api/events` stream. Full check-in page still writes to `daily_logs`.
+
+---
+
 ## Database Schema
+
+### Original tables (migration 001)
+Migration file: `supabase/migrations/001_neurochemistry_tracker.sql`
+
+### New tables (migration 002)
+Migration file: `supabase/migrations/002_neuro_run_upgrade.sql`
+
+New tables: `user_preferences`, `events`, `quests`, `quest_history`, `daily_summaries`, `ai_prompts`, `interventions`, `health_samples`
+
+All new tables use the same RLS pattern as existing tables (service-role bypasses, `app.telegram_user_id` setting for direct access).
+
+---
+
+## Environment Variables (all required)
+
+### Server-only
+```
+SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, CRON_SECRET
+AI_PROVIDER        anthropic (default) | openai
+ANTHROPIC_API_KEY  for Anthropic SDK (claude-haiku-4-5-20251001 by default)
+OPENAI_API_KEY     for OpenAI SDK (gpt-4o-mini by default)
+ANTHROPIC_MODEL    optional model override
+OPENAI_MODEL       optional model override
+HEALTH_WEBHOOK_SECRET  for Apple Health bridge endpoint
+```
+
+### Client-safe
+```
+NEXT_PUBLIC_APP_URL  deployed app URL (used in Telegram buttons)
+```
+
+---
+
+## Legacy Database Schema (migration 001)
 
 Migration file: `supabase/migrations/001_neurochemistry_tracker.sql`
 
