@@ -11,10 +11,6 @@
     {
       "path": "/api/cron/evening",
       "schedule": "30 20 * * *"
-    },
-    {
-      "path": "/api/cron/hourly",
-      "schedule": "0 5-20 * * *"
     }
   ]
 }
