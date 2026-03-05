@@ -3,13 +3,17 @@ import type { Phase } from "@/types/database"
 export type { Phase }
 
 /**
- * Returns the current phase based on UTC time minus 5h (logical day offset).
- * morning: 05:00–11:59 (UTC 00:00–06:59 after offset)
- * day:     12:00–17:59 (UTC 07:00–12:59 after offset)
- * evening: 18:00–04:59 (UTC 13:00–23:59 after offset, wraps)
+ * Returns the current phase based on raw UTC time.
+ * morning: UTC 05:00–11:59 (≈ Moscow 08:00–14:59)
+ * day:     UTC 12:00–17:59 (≈ Moscow 15:00–20:59)
+ * evening: UTC 18:00–04:59 (≈ Moscow 21:00–07:59)
+ *
+ * Note: the 5h logical-day offset is for DATE boundaries only, not phase.
+ * Phase reflects actual time-of-day so that morning/day/evening match
+ * the user's waking hours.
  */
 export function getCurrentPhase(): Phase {
-  const now = new Date(Date.now() - 5 * 60 * 60 * 1000)
+  const now = new Date()
   const hour = now.getUTCHours()
   if (hour >= 5 && hour < 12) return "morning"
   if (hour >= 12 && hour < 18) return "day"

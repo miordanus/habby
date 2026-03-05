@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth, apiHeaders } from "@/hooks/useAuth"
 import NavBar from "@/components/NavBar"
@@ -57,6 +57,8 @@ export default function Home() {
   const [ratingValues, setRatingValues] = useState<{ energy: number | null; focus: number | null; stress: number | null }>({
     energy: null, focus: null, stress: null,
   })
+  const [generatingQuests, setGeneratingQuests] = useState(false)
+  const questsGeneratedRef = useRef(false)
 
   useEffect(() => {
     setMounted(true)
@@ -97,6 +99,35 @@ export default function Home() {
   useEffect(() => {
     if (state === "authed") load()
   }, [state, load])
+
+  const generateQuests = useCallback(async () => {
+    if (!telegramUserId || generatingQuests) return
+    setGeneratingQuests(true)
+    try {
+      const res = await fetch("/api/quests/generate", {
+        method: "POST",
+        headers: { "x-telegram-user-id": String(telegramUserId) },
+      })
+      if (res.ok) await load()
+    } finally {
+      setGeneratingQuests(false)
+      questsGeneratedRef.current = true
+    }
+  }, [telegramUserId, generatingQuests, load])
+
+  // Auto-generate quests on first load if none exist
+  useEffect(() => {
+    if (
+      state === "authed" &&
+      questsData !== null &&
+      questsData.quests.length === 0 &&
+      !questsGeneratedRef.current &&
+      !generatingQuests
+    ) {
+      questsGeneratedRef.current = true
+      generateQuests()
+    }
+  }, [state, questsData, generatingQuests, generateQuests])
 
   const logEvent = useCallback(
     async (type: string, params: Record<string, unknown> = {}) => {
@@ -252,8 +283,22 @@ export default function Home() {
 
           {dailyQuests.length === 0 ? (
             <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl px-4 py-6 text-center">
-              <p className="text-sm font-mono text-[var(--text-muted)]">Квесты ещё не назначены</p>
-              <p className="text-xs font-mono text-[var(--text-muted)] mt-1 opacity-60">Они появятся утром</p>
+              {generatingQuests ? (
+                <>
+                  <p className="text-sm font-mono text-[var(--text-muted)]">Генерируем квесты…</p>
+                  <p className="text-xs font-mono text-[var(--text-muted)] mt-1 opacity-60">Секунду</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-mono text-[var(--text-muted)]">Квесты ещё не назначены</p>
+                  <button
+                    onClick={generateQuests}
+                    className="mt-3 text-xs font-mono text-black bg-[#00FF85] px-4 py-1.5 rounded-lg"
+                  >
+                    Создать квесты
+                  </button>
+                </>
+              )}
             </div>
           ) : (
             <div className="space-y-2">
