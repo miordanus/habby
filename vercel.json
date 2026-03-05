@@ -5,6 +5,10 @@
       "schedule": "30 5 * * *"
     },
     {
+      "path": "/api/cron/day",
+      "schedule": "0 12 * * *"
+    },
+    {
       "path": "/api/cron/evening",
       "schedule": "30 20 * * *"
     }
