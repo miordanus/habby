@@ -103,14 +103,25 @@ export default function TimelinePage() {
     if (!telegramUserId || !editTime) return
     setSaving(true)
     try {
-      // Build new ts_effective from today's date + the edited time
-      const today = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString().slice(0, 10)
-      const newTs = `${today}T${editTime}:00Z`
+      // Build new ts_effective: use the event's logical date + the new time
+      const logicalDate = new Date(new Date(event.ts_effective).getTime() - 5 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10)
+      const newTs = `${logicalDate}T${editTime}:00Z`
 
-      // We don't have a PATCH /api/events/[id] yet — insert a note and reload
-      // For now just close — this would be the update endpoint
-      console.log("Would update event", event.id, "ts_effective to", newTs)
-      setEditingId(null)
+      const res = await fetch(`/api/events/${event.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          "x-telegram-user-id": String(telegramUserId),
+        },
+        body: JSON.stringify({ ts_effective: newTs }),
+      })
+
+      if (res.ok) {
+        setEditingId(null)
+        await load()
+      }
     } finally {
       setSaving(false)
     }

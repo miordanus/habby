@@ -4,6 +4,7 @@ import { getSupabase } from "@/lib/supabaseServer"
 import { getLogicalDate } from "@/lib/logicalDate"
 import { computeDayScore } from "@/lib/scoreEngine"
 import { generateAI } from "@/lib/aiProvider"
+import { computeStreak } from "@/lib/streak"
 import type { Event, Quest, HealthSample } from "@/types/database"
 
 export const runtime = "nodejs"
@@ -64,6 +65,18 @@ export async function GET(req: NextRequest) {
       const waterTotal = events.filter((e) => e.type === "water_ml").reduce((s, e) => s + (e.value ?? 0), 0)
       const coffeeCount = events.filter((e) => e.type === "coffee_cup").length
 
+      // Compute streak from daily_logs
+      const thirtyDaysAgo = new Date(new Date(today + "T12:00:00Z").getTime() - 29 * 86400000)
+        .toISOString()
+        .slice(0, 10)
+      const { data: logRows } = await sb
+        .from("daily_logs")
+        .select("date")
+        .eq("user_id", userId)
+        .gte("date", thirtyDaysAgo)
+        .lte("date", today)
+      const { streak } = computeStreak((logRows ?? []).map((r) => r.date as string), today)
+
       // Generate AI verdict
       const ai = await generateAI(sb, "daily_verdict", {
         date: today,
@@ -78,7 +91,7 @@ export async function GET(req: NextRequest) {
         quests_completed: questsCompleted,
         quests_total: dailyQuests.length,
         score_reasons: score.score_reasons.map((r) => r.reason).join("; "),
-        streak: 0, // TODO: compute streak
+        streak,
       })
 
       // Update summary verdict
