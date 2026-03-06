@@ -49,39 +49,6 @@ export async function GET(req: NextRequest) {
     byDate.set(d, aggregateDay(evs))
   }
 
-  // Fallback: fetch daily_logs rows for dates not covered by events
-  const eventDates = new Set(byDate.keys())
-  const { data: legacyRows } = await sb
-    .from("daily_logs")
-    .select("date,nicotine_count,caffeine_cups,calories,protein_g,water_ml,training_type")
-    .eq("user_id", userId)
-    .gte("date", rangeFrom)
-    .lte("date", thisTo)
-
-  for (const row of legacyRows ?? []) {
-    const d = row.date as string
-    if (!eventDates.has(d)) {
-      // Convert legacy row shape to DayAggregate (all fields present)
-      byDate.set(d, {
-        nicotine_count: row.nicotine_count ?? 0,
-        caffeine_cups: row.caffeine_cups ?? 0,
-        water_ml: row.water_ml ?? 0,
-        calories: row.calories ?? null,
-        protein_g: row.protein_g ?? null,
-        training_type: (row.training_type ?? "none") as DayAggregate["training_type"],
-        wake_time: null,
-        sleep_time: null,
-        phone_free_min: null,
-        resting_hr: null,
-        weight_kg: null,
-        vitamins_adam: false,
-        magnesium: false,
-        l_theanine: false,
-        alcohol_yes: false,
-      })
-    }
-  }
-
   function summarise(from: string, to: string) {
     const subset: DayAggregate[] = []
     for (const [d, agg] of byDate) {
