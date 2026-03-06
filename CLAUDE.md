@@ -82,7 +82,9 @@ No middleware.ts. No Supabase Auth (JWT). Auth is Telegram initData + service-ro
 │   ├── aiProvider.ts           # AI abstraction (Anthropic/OpenAI switchable via AI_PROVIDER env)
 │   ├── scoreEngine.ts          # computeDayScore(events, quests, health) → 0-100 components
 │   ├── questEngine.ts          # Quest templates, generation, progress, lifecycle
-│   └── interventionEngine.ts  # Conditional trigger checks + sendIntervention()
+│   ├── eventAggregator.ts      # Pure fn: Event[] → DayAggregate (canonical read path)
+│   ├── ruleEngine.ts           # Pure fn: evaluateRules(events, yesterday, utcHour) → RuleResult[]
+│   └── interventionEngine.ts  # runConditionalChecks() — uses ruleEngine, sends Telegram
 ├── types/
 │   └── database.ts             # TypeScript interfaces for all DB rows (incl. Neuro-Run types)
 ├── supabase/
@@ -110,7 +112,22 @@ Phases use **raw UTC hours** — NOT the 05:00 logical-date offset. This is inte
 Phase is computed from `new Date().getUTCHours()` in `lib/phaseUtils.ts`. It is distinct from logical date computation.
 
 ### Event Types
-`nicotine` | `coffee_cup` | `water_ml` | `vitamins_adam` | `magnesium` | `l_theanine` | `workout` | `alcohol_yes` | `self_rating_energy` | `self_rating_focus` | `self_rating_stress`
+
+**Tap/count events** (each occurrence = one event row):
+`nicotine` | `coffee_cup` | `vitamins_adam` | `magnesium` | `l_theanine` | `alcohol_yes` | `workout`
+
+**Value events** (carry a numeric `.value`):
+`water_ml` | `calories_kcal` | `protein_g` | `weight_kg` | `resting_hr_manual` | `phone_free_min` | `self_rating_energy` | `self_rating_focus` | `self_rating_stress`
+
+**Text events** (carry a string `.value_text`):
+`wake_time` | `sleep_time` | `training_session` (value_text: none/swim/gym/home)
+
+Aggregation rules used by `lib/eventAggregator.ts`:
+- **COUNT** — nicotine_count, caffeine_cups (count of matching event rows)
+- **SUM** — water_ml (sum of `.value` across all events)
+- **ANY** — vitamins_adam, magnesium, l_theanine, alcohol_yes (true if any row has `value_bool=true`)
+- **LATEST numeric** — calories, protein_g, weight_kg, resting_hr, phone_free_min (`.value` of newest)
+- **LATEST text** — wake_time, sleep_time, training_type (`.value_text` of newest)
 
 ### Quest System
 - 3 daily + 3 weekly + 3 monthly quests
@@ -128,8 +145,11 @@ Phase is computed from `new Date().getUTCHours()` in `lib/phaseUtils.ts`. It is 
 - `components/NicotineButton.tsx`: tap = log; hold 400ms → type picker (cig/vape/pouch/other)
 - Type persisted to localStorage + `user_preferences` table
 
+### Event Aggregation (canonical read path)
+`lib/eventAggregator.ts` provides `aggregateDay(events: Event[]): DayAggregate` — a pure function (no DB calls, safe on client and server) that collapses an array of events for a single logical date into the same field shape as `daily_logs`. This is the single canonical way to derive "what happened today" from the event stream. All stats, scoring, and goal evaluation should call this rather than querying `daily_logs` directly.
+
 ### Backward Compat
-`daily_logs` table and all legacy API routes (`/api/logs`, `/api/goals`, `/api/evaluations`) are kept intact. New home screen uses `/api/events` stream. Full check-in page still writes to `daily_logs`.
+`daily_logs` table and legacy API routes (`/api/logs`, `/api/evaluations`) are kept intact. Full check-in page still writes to `daily_logs`. Stats and scoring now prefer the event stream with `daily_logs` as a fallback for dates that predate the event architecture.
 
 ---
 
@@ -544,6 +564,7 @@ checkWeeklyTrainingBonus(sb, userId, today)
 - "This week" = last 7 logical days ending today
 - "Last week" = 7 days before that
 - Averages are `Math.round()`, null if no data for the period
+- **Data source**: queries `events` table for the full 14-day window, groups by `logical_date`, aggregates via `lib/eventAggregator.ts`. For dates with no events, falls back to `daily_logs` rows (backward compat for pre-event data).
 
 ### `GET /api/events`
 - `?date=YYYY-MM-DD` → array of events for that logical date
@@ -726,27 +747,41 @@ Result cached in `daily_summaries` table. Re-computed on-demand if not yet cache
 
 ## Intervention Engine
 
+### Rule Engine (pure layer)
+
+File: `lib/ruleEngine.ts`
+
+Pure function — no I/O, no DB, safe to test in isolation.
+
+```typescript
+evaluateRules(todayEvents: Event[], yesterdayEvents: Event[], utcHour: number): RuleResult[]
+```
+
+Returns all triggered rules sorted by priority (lower number = higher priority). Each `RuleResult` has `{ trigger_type, priority, cooldown_hours, observations, question, buttons }`.
+
+| Rule | trigger_type | Priority | Condition |
+|---|---|---|---|
+| Nicotine rate | `nicotine_rate` | 1 | Count > paced limit (20 × elapsed/16h) |
+| Water critical | `water_critical` | 2 | Water < time-scaled target (500/1000/1500 ml) |
+| No events 90min | `no_events_90min` | 3 | Last event > 90 min ago |
+| Energy untracked | `energy_untracked` | 4 | No `self_rating_energy` event by utcHour ≥ 9 |
+| Coffee + theanine | `coffee_theanine` | 5 | ≥2 coffees, no l_theanine, utcHour ≥ 8 |
+| Vitamins reminder | `vitamins_reminder` | 6 | No `vitamins_adam` event by utcHour ≥ 10 |
+| Good progress | `good_progress` | 7 | ≥40% nicotine drop OR ≥40% water increase vs yesterday |
+
+### Intervention dispatcher
+
 File: `lib/interventionEngine.ts`
 
-Trigger checks run during `GET /api/cron/day` and non-blocking after certain event writes.
+`runConditionalChecks(sb, userId, todayEvents, yesterdayEvents, quests, phase)` — called by day cron and non-blocking after event writes. Uses `ruleEngine.evaluateRules()` to find triggered rules, checks cooldown via `interventions` table, then calls `sendIntervention()` for the highest-priority winner.
 
-### Trigger conditions
-
-| Check | Condition | When |
-|---|---|---|
-| `checkNicotineSpike()` | Rate > 2× daily goal rate for elapsed time AND count > 5 | After nicotine event |
-| `checkHydrationLow()` | < 30–45% of 2000ml goal by current phase | After water_ml event |
-| `checkNoEvents()` | No events in last 3 hours | Day cron only |
-| `checkImprovement()` | ≥40% nicotine reduction OR ≥40% water increase vs yesterday | Day cron only |
-| `checkMissedQuests()` | ≥2 daily quests still active during evening phase | Evening cron |
-
-Each trigger calls `sendIntervention()` which:
+`sendIntervention()`:
 1. Calls `lib/aiProvider.ts` with the `intervention_conditional` prompt template
-2. Sends a Telegram message with an inline web_app button
-3. Inserts a row into `interventions` table (audit trail, prevents double-firing)
+2. Sends a Telegram message with inline buttons (web_app open + quick-log callbacks)
+3. Inserts a row into `interventions` table (audit trail, enforces `cooldown_hours`)
 
 ### `interventions` table
-Tracks which interventions were already sent (`trigger_key`, `date`) to avoid repeated messages.
+Tracks which interventions were already sent (`trigger_key`, `triggered_at`) to enforce per-rule cooldowns and avoid double-firing.
 
 ---
 
