@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react"
 import { useAuth, apiHeaders } from "@/hooks/useAuth"
 import NavBar from "@/components/NavBar"
+import { aggregateDay, type DayAggregate } from "@/lib/eventAggregator"
 
 interface GoalItemForm {
   metric_key: string
@@ -33,10 +34,33 @@ const METRIC_META: Record<string, { label: string; unit?: string; type: "number"
 
 const INPUT = "bg-[var(--bg-input)] border border-[var(--input-border)] px-3 py-2 rounded-lg text-sm focus:outline-none focus:border-[#00FF85] transition-colors font-mono w-28 text-right"
 
+function getActual(key: string, agg: DayAggregate): number | boolean | null {
+  const val = agg[key as keyof DayAggregate]
+  return val === undefined ? null : (val as number | boolean | null)
+}
+
+function isGoalMet(item: GoalItemForm, actual: number | boolean | null): boolean {
+  if (actual === null) return false
+  if (item.operator === "==" && item.target_bool !== null) return actual === item.target_bool
+  if (typeof actual !== "number" || item.target_number === null) return false
+  if (item.operator === "<=") return actual <= item.target_number
+  if (item.operator === ">=") return actual >= item.target_number
+  if (item.operator === "range" && item.tolerance_number !== null)
+    return Math.abs(actual - item.target_number) <= item.target_number * item.tolerance_number
+  return false
+}
+
+function formatTarget(item: GoalItemForm): string {
+  if (item.operator === "==" && item.target_bool !== null) return item.target_bool ? "Required" : "None"
+  if (item.operator === "range") return `${item.target_number} ±${Math.round((item.tolerance_number ?? 0.1) * 100)}%`
+  return `${item.operator} ${item.target_number}`
+}
+
 export default function GoalsPage() {
   const { state, telegramUserId } = useAuth()
   const [mounted, setMounted] = useState(false)
   const [current, setCurrent] = useState<GoalData | null>(null)
+  const [todayAggregate, setTodayAggregate] = useState<DayAggregate | null>(null)
   const [editing, setEditing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
@@ -51,14 +75,20 @@ export default function GoalsPage() {
 
   const load = useCallback(async () => {
     if (!telegramUserId) return
-    const res = await fetch(`/api/goals`, {
-      headers: { "x-telegram-user-id": String(telegramUserId) },
-    })
-    if (res.ok) {
-      const data: GoalData | null = await res.json()
+    const headers = { "x-telegram-user-id": String(telegramUserId) }
+    const [goalsRes, eventsRes] = await Promise.all([
+      fetch(`/api/goals`, { headers }),
+      fetch(`/api/events?date=${today}`, { headers }),
+    ])
+    if (goalsRes.ok) {
+      const data: GoalData | null = await goalsRes.json()
       setCurrent(data)
     }
-  }, [telegramUserId])
+    if (eventsRes.ok) {
+      const events = await eventsRes.json()
+      setTodayAggregate(aggregateDay(events ?? []))
+    }
+  }, [telegramUserId, today])
 
   useEffect(() => {
     if (state === "authed") load()
@@ -116,6 +146,9 @@ export default function GoalsPage() {
     const meta = METRIC_META[item.metric_key]
     if (!meta) return null
 
+    const actual = readOnly && todayAggregate ? getActual(item.metric_key, todayAggregate) : null
+    const met = actual !== null ? isGoalMet(item, actual) : null
+
     return (
       <div key={item.metric_key} className="flex items-center justify-between gap-3 py-2.5 border-b border-[var(--border)] last:border-0">
         <div className="min-w-0">
@@ -124,9 +157,14 @@ export default function GoalsPage() {
         </div>
         {meta.type === "number" ? (
           readOnly ? (
-            <span className="text-sm font-bold font-mono text-[#00FF85]">
-              {item.operator} {item.target_number}
-            </span>
+            <div className="text-right shrink-0">
+              {actual !== null && (
+                <p className={`text-base font-bold font-mono leading-tight ${met ? "text-[#00FF85]" : "text-[var(--text-muted)]"}`}>
+                  {actual as number}
+                </p>
+              )}
+              <p className="text-xs font-mono text-[var(--text-muted)]">{formatTarget(item)}</p>
+            </div>
           ) : (
             <input
               type="number"
@@ -137,9 +175,14 @@ export default function GoalsPage() {
           )
         ) : (
           readOnly ? (
-            <span className={`text-sm font-mono font-bold ${item.target_bool ? "text-[#00FF85]" : "text-[var(--text-muted)]"}`}>
-              {item.target_bool ? "Yes" : "No"}
-            </span>
+            <div className="text-right shrink-0">
+              {actual !== null && (
+                <p className={`text-base font-mono leading-tight ${met ? "text-[#00FF85]" : "text-[var(--text-muted)]"}`}>
+                  {met ? "✓" : "✗"}
+                </p>
+              )}
+              <p className="text-xs font-mono text-[var(--text-muted)]">{item.target_bool ? "Required" : "None"}</p>
+            </div>
           ) : (
             <button
               onClick={() => updateItem(item.metric_key, "target_bool", !item.target_bool)}
@@ -167,7 +210,7 @@ export default function GoalsPage() {
         style={{ paddingTop: "max(2.5rem, env(safe-area-inset-top, 2.5rem))" }}
       >
         <h1 className="text-lg font-bold">Goals</h1>
-        <p className="text-xs font-mono text-[var(--text-muted)]">Current contract + next version</p>
+        <p className="text-xs font-mono text-[var(--text-muted)]">Today&apos;s progress · current contract · next version</p>
       </header>
 
       <main className="px-4 max-w-xl mx-auto pt-4 space-y-4">
